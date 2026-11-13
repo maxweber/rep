@@ -255,6 +255,71 @@
       (finally
         (fs/delete prelude)))))
 
+(deftest printing-prelude-test
+  (let [prelude (prelude-file (str "(ns shop)\n"
+                                   "(binding [*out* *err*] (println \"a warning\"))\n"
+                                   "(println \"loaded\")\n"
+                                   "(defn price [amount] (* 2 amount))\n"))
+        heard (java.io.StringWriter.)]
+    (try
+      (binding [*err* heard]
+        (with-image {:rep/prelude prelude}
+          (fn [w]
+            (testing "a prelude that prints to standard error starts the image like any other"
+              (is (= :running (:image/state (image/status w))))
+              (is (= 1 (:image/generation (image/status w))))
+              (is (= "42\n" (:body (evaluate w (uuid) "(shop/price 21)")))))
+            (testing "and again after the image ended"
+              (evaluate w (uuid) "(System/exit 0)")
+              (is (some? (running w 2)))
+              (is (= "42" (:value (image/evaluate w "(shop/price 21)")))))
+            (testing "what the setup printed went to the server's standard error, marked"
+              (is (str/includes? (str heard) "rep setup: a warning\n"))
+              (is (str/includes? (str heard) "rep setup: loaded\n"))))))
+      (finally
+        (fs/delete prelude)))))
+
+(deftest setup-limit-test
+  (let [prelude (prelude-file "(spit \"loads.txt\" \"load\\n\" :append true)\n@(promise)\n")]
+    (try
+      (with-image {:rep/prelude prelude :rep/setup-ms 300 :rep/backoff-ms 60000 :rep/backoff-max-ms 60000}
+        (fn [w]
+          (testing "a setup that does not come back is ended at the limit and counts as a failed start"
+            (let [status (image/status w)]
+              (is (= :failed (:image/state status)))
+              (is (= "The session's setup did not finish within 300 ms." (:image/error status)))
+              (is (= 1 (:image/failures status))))
+            (is (= "load\n" (slurp (fs/file (:rep/dir w) "loads.txt"))))
+            (is (wait-for 2000 #(empty? (nrepl-children))) "the process that hung is gone"))
+          (testing "whoever asks hears the reason"
+            (is (= "The session's setup did not finish within 300 ms."
+                   (:error (image/evaluate w "(+ 1 2)")))))))
+      (finally
+        (fs/delete prelude)))))
+
+(deftest base-url-test
+  (with-image {:rep/grace-ms 5000}
+    (fn [w]
+      (let [port (:rep/port w)
+            ask (fn [host code]
+                  (http/post (str "http://" host ":" port "/rep/" (uuid) "/" (uuid))
+                             {:headers {"Authorization" (str "Bearer " server-test/token)}
+                              :body code
+                              :throw false}))
+            slow (future (ask "localhost" "(Thread/sleep 600) (upload-url \"in/a.txt\")"))
+            _ (Thread/sleep 200)
+            quick (ask "127.0.0.1" "(upload-url \"in/a.txt\")")]
+        (testing "two callers that reach the shared image under two addresses each get their own in a URL"
+          (is (str/starts-with? (:body quick) (str "\"http://127.0.0.1:" port "/file/in/a.txt?")))
+          (is (str/starts-with? (:body @slow) (str "\"http://localhost:" port "/file/in/a.txt?"))
+              "the caller that asked while another one evaluated"))
+        (testing "a future keeps the address of the evaluation that started it"
+          (is (str/starts-with? (:body (ask "localhost" "@(future (download-url \"in/a.txt\"))"))
+                                (str "\"http://localhost:" port "/file/in/a.txt?"))))
+        (testing "the host's own evaluations have no caller, their URLs have no address"
+          (is (str/starts-with? (:value (image/evaluate w "(upload-url \"in/a.txt\")"))
+                                "\"/file/in/a.txt?")))))))
+
 (deftest evaluate-test
   (with-image {}
     (fn [w]

@@ -383,6 +383,34 @@
             (let [response (evaluate w (uuid) "(+ 1 2)")]
               (is (= "failed" (get (:headers response) "rep-status")))
               (is (str/starts-with? (:body response) "The session's prelude failed:"))))))
+      (testing "a prelude may print, to standard error too: only an error fails it"
+        (spit prelude (str "(ns shop)\n"
+                           "(binding [*out* *err*] (println \"a warning\"))\n"
+                           "(println \"loaded\")\n"
+                           "(defn price [amount] (* 2 amount))\n"))
+        (with-system {:rep/prelude prelude}
+          (fn [w]
+            (let [response (evaluate w (uuid) "(shop/price 21)")]
+              (is (= "done" (get (:headers response) "rep-status")))
+              (is (= "42\n" (:body response)) "and what it printed is not in an answer")))))
+      (testing "a prelude that prints and then throws fails with the error, not with what it printed"
+        (spit prelude (str "(binding [*out* *err*] (println \"a warning\"))\n"
+                           "(throw (ex-info \"broken prelude\" {}))\n"))
+        (with-system {:rep/prelude prelude}
+          (fn [w]
+            (let [response (evaluate w (uuid) "(+ 1 2)")]
+              (is (= "failed" (get (:headers response) "rep-status")))
+              (is (str/starts-with? (:body response) "The session's prelude failed:"))
+              (is (str/includes? (:body response) "broken prelude"))
+              (is (not (str/includes? (:body response) "a warning")))))))
+      (testing "a setup that takes longer than :rep/setup-ms ends the process and fails the request"
+        (spit prelude "@(promise)\n")
+        (with-system {:rep/prelude prelude :rep/setup-ms 300}
+          (fn [w]
+            (let [response (evaluate w (uuid) "(+ 1 2)")]
+              (is (= "failed" (get (:headers response) "rep-status")))
+              (is (= "The session's setup did not finish within 300 ms.\n" (:body response)))
+              (is (empty? @session/children) "the process that hung is gone")))))
       (finally
         (fs/delete prelude)))))
 

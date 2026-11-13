@@ -273,11 +273,19 @@ Link `bin/rep` into your `PATH`. It finds its sources next to itself.
 That is how a host gives the code more to call. With a `shop.clj` that defines
 the namespace `shop`, a caller evaluates `(shop/price 21)`.
 
+A prelude fails when its evaluation ends with an error, and only then. What
+it prints, to standard error too, is no failure: the server writes it to its
+own standard error, every line behind `rep setup:`. The setup of a fresh
+process may take a minute (`:rep/setup-ms`). Past that the server ends the
+process and the start counts as failed, so a prelude that waits forever does
+not hang the server.
+
 More options for a host. The docstring of `rep.server/prepare` has the rest.
 
 | Option | What it does |
 |---|---|
 | `:rep/class-path` | A vector of paths that the session's babashka gets on its classpath, after the server's own. `bb serve --class-path a,b` sets it from the command line. |
+| `:rep/setup-ms` | How long the setup of a fresh process may take, the prelude included. 60000 by default. |
 | `:rep/shared-image?` | All sessions evaluate in one process, see the next section. |
 | `:rep/after-evaluation` | `(fn [w evaluation])`. Runs after every evaluation of a POST. `evaluation` has `:evaluation/session`, `:evaluation/id`, `:evaluation/state`, which is `:done` or `:failed`, `:evaluation/exit` and `:evaluation/code`. |
 | `:rep/on-image-start` | `(fn [w image])`. Runs after every start of the shared image that worked, its setup code included. `image` has `:image/generation`, `:image/pid`, `:image/port` and `:image/start-ms`. |
@@ -331,7 +339,12 @@ bb serve --shared-image
   pause before the next try. The pause is 100 ms, then twice as long each
   time, up to five seconds. So a prelude that throws does not spin. A request
   in that time fails with the reason. `:rep/backoff-ms` and
-  `:rep/backoff-max-ms` set the first and the longest pause.
+  `:rep/backoff-max-ms` set the first and the longest pause. A prelude that
+  only prints to standard error is no failed start, and one that does not come
+  back within `:rep/setup-ms` is.
+- Evaluations run side by side, and two callers may reach the server under two
+  addresses. The address of each travels with its code, so `upload-url` and
+  `download-url` hand every caller a URL for its own.
 - `Rep-Session` keeps its meaning per session uuid. It says `started` for a
   uuid the server sees for the first time and `continued` afterwards. It says
   `restarted` when the image started again since that uuid's last evaluation,

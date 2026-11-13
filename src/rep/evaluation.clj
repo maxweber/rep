@@ -137,9 +137,10 @@
 (defn- evaluate!
   "Runs `body` in the session's process and answers the outcome. Every
    evaluation has a connection and an nREPL session of its own, so that
-   two of them run at the same time."
+   two of them run at the same time. The address the caller reached the
+   server under travels with the code, as a binding around it."
   [w {:evaluation/keys [session id output base-url]} body]
-  (let [{:session/keys [port error] :as process} (process! w session)]
+  (let [{:session/keys [port error]} (process! w session)]
     (if error
       (do
         (output/print! output (str error "\n"))
@@ -147,11 +148,10 @@
       (let [connection (nrepl/connect port)]
         (try
           (let [nrepl-session (nrepl/clone! connection)
-                _ (session/base-url! process connection nrepl-session base-url)
                 _ (nrepl/send! connection {"op" "eval"
                                            "id" id
                                            "session" nrepl-session
-                                           "code" (nrepl/wrapped body)})
+                                           "code" (nrepl/wrapped body base-url)})
                 {:keys [value failed?]} (try
                                           (follow! connection id output)
                                           (catch clojure.lang.ExceptionInfo e

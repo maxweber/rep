@@ -267,6 +267,9 @@
    :rep/public-url    how the outside reaches the server, else from the request
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
+   :rep/setup-ms      how long the setup of a fresh process may take, the
+                      prelude included, 60000. Past it the process is ended
+                      and the start counts as failed
    :rep/class-path    a vector of paths that the session's babashka gets on
                       its classpath, after the server's own. On the command
                       line `--class-path a,b`
@@ -316,6 +319,7 @@
             :rep/token-days 30
             :rep/public-url (env "REP_PUBLIC_URL")
             :rep/prelude (env "REP_PRELUDE")
+            :rep/setup-ms session/setup-ms
             :rep/shared-image? (contains? #{"1" "true"} (env "REP_SHARED_IMAGE"))
             :rep/backoff-ms 100
             :rep/backoff-max-ms 5000

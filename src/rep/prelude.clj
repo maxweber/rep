@@ -8,11 +8,19 @@
             [rep.files :as files]))
 
 (defonce ^{:doc "What the server told this session: `:secret` signs the
-  file URLs and nothing else, `:base-url` is where the caller reached the server,
-  `:url-seconds` how long a URL holds, `:parent` the server's process id,
-  `:shared-image?` is true in the one process that all sessions share."}
+  file URLs and nothing else, `:base-url` is the server's public URL when it
+  has one, `:url-seconds` how long a URL holds, `:parent` the server's
+  process id, `:shared-image?` is true in the one process that all sessions
+  share."}
   config
   (atom {}))
+
+(def ^:dynamic *base-url*
+  "Where the caller of the evaluation that runs right now reached the
+   server. The server binds it around the code of every request, so in
+   a process that several callers share each one gets URLs for its own
+   address. A future that the code starts keeps the binding."
+  nil)
 
 (defn- parent-alive?
   [pid]
@@ -37,12 +45,6 @@
   (when (and parent (not (:parent @config)))
     (watch-parent! parent))
   (swap! config merge options)
-  nil)
-
-(defn base-url!
-  "Called by the server before the code of a request runs."
-  [url]
-  (swap! config assoc :base-url url)
   nil)
 
 (defn sh
@@ -81,23 +83,28 @@
         (throw e)))))
 
 (defn- signed-url
+  "A signed URL that starts where the caller of this evaluation reached
+   the server, else at the server's public URL."
   [method path seconds]
   (let [{:keys [secret base-url url-seconds]} @config]
     (files/url {:rep/file-secret secret}
                {:url/method method
                 :url/path path
                 :url/seconds (or seconds url-seconds)
-                :url/base base-url})))
+                :url/base (or *base-url* base-url)})))
 
 (defn upload-url
   "A URL for an HTTP PUT whose body becomes the file at `path` in the work
-   folder. It needs no token and expires."
+   folder. It needs no token and expires. A file that is too large for
+   one request goes up in parts: the same URL with `&offset=<n>` appends
+   the body at that offset, and offset 0 starts the file over."
   ([path] (signed-url "PUT" path nil))
   ([path seconds] (signed-url "PUT" path seconds)))
 
 (defn download-url
   "A URL that answers an HTTP GET with the file at `path` in the work
-   folder. It needs no token and expires."
+   folder. It needs no token and expires. A `Range` header fetches a
+   part of the file."
   ([path] (signed-url "GET" path nil))
   ([path seconds] (signed-url "GET" path seconds)))
 
@@ -122,8 +129,10 @@
   (println "  Runs the bash script in the work folder, its output goes into the answer as bash wrote it. Answers {:exit <code>}.")
   (println "(upload-url path) (upload-url path seconds)")
   (println "  A URL for an HTTP PUT whose body becomes the file at path in the work folder.")
+  (println "  A large file goes up in parts: the same URL with &offset=<bytes so far>, 0 starts the file over.")
   (println "(download-url path) (download-url path seconds)")
-  (println "  A URL that answers an HTTP GET with the file at path in the work folder.")
+  (println "  A URL that answers an HTTP GET with the file at path in the work folder. A Range header fetches a part.")
+  (println "  The rep command does both in parts: rep upload LOCAL PATH, rep download PATH LOCAL.")
   (println)
   (println "Long work: start it in a future and keep the result in an atom, then ask in a later request.")
   (println "  (def result (atom nil))")
@@ -136,7 +145,8 @@
 
 (comment
   (configure! {:secret "secret" :url-seconds 900})
-  (base-url! "http://127.0.0.1:8730")
   (sh "echo one; echo two >&2; exit 3")
   (with-out-str (sh "echo captured"))
-  (upload-url "in/clip.mp4"))
+  (binding [*base-url* "http://127.0.0.1:8730"]
+    (upload-url "in/clip.mp4"))
+  (download-url "out/final.mp4" 60))

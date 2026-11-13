@@ -183,7 +183,8 @@
   "Starts the image and its supervision, and waits until the first start
    is through, the hook `:rep/on-image-start` included. A first start
    that fails does not throw: the supervisor tries again, and `status`
-   tells why. Answers `w`.
+   tells why. A setup that does not finish within `:rep/setup-ms` is
+   such a failed start. Answers `w`.
 
    `rep.server/start!` calls this. A host that owns the HTTP server and
    only mounts `rep.server/handle` calls it on the prepared system
@@ -198,7 +199,7 @@
         (let [stop (promise)]
           (swap! image assoc :image/entry (promise) :image/stop stop)
           (swap! image assoc :image/supervisor (future (supervise! w stop settled))))))
-    (deref settled 60000 nil))
+    (deref settled (+ 20000 (or (:rep/setup-ms w) session/setup-ms)) nil))
   w)
 
 (defn stop!
@@ -347,51 +348,6 @@
       (discard! connection))
     nil))
 
-(defn- converse!
-  "Sends `code` as the eval `id` and reads the answers until it is done.
-   Puts every chunk the code printed into the atom `chunks`, as
-   `[:out text]` or `[:err text]`. Answers `:value`, the printed value
-   of the last form, and `:failed?`. A read past `deadline` throws a
-   `java.net.SocketTimeoutException`."
-  [{:nrepl/keys [socket session] :as connection} id code deadline chunks]
-  (nrepl/send! connection {"op" "eval"
-                           "id" id
-                           "session" session
-                           "code" (nrepl/wrapped code)})
-  (loop [result {}]
-    (.setSoTimeout socket (int (max 1 (- deadline (System/currentTimeMillis)))))
-    (let [{:keys [out err value status] :as message} (nrepl/receive! connection)]
-      (if (not= id (:id message))
-        (recur result)
-        (let [_ (when out (swap! chunks conj [:out out]))
-              _ (when err (swap! chunks conj [:err err]))
-              result (cond-> result
-                       value (assoc :value value)
-                       (some #{"eval-error" "interrupted"} status) (assoc :failed? true))]
-          (if (nrepl/done? message)
-            result
-            (recur result)))))))
-
-(defn- printed
-  "The text of `chunks` in the order they came."
-  [chunks]
-  (apply str (map second chunks)))
-
-(defn- outcome
-  "The answer of `evaluate`, from what the eval sent. Babashka writes
-   its error text to standard error right before it reports the
-   failure, so the last chunk from there is the error and not output."
-  [chunks {:keys [value failed?]}]
-  (if-not failed?
-    {:out (printed chunks) :value value :error nil}
-    (let [index (->> chunks
-                     (keep-indexed (fn [index [kind]] (when (= :err kind) index)))
-                     (last))]
-      {:out (printed (keep-indexed (fn [i chunk] (when (not= i index) chunk)) chunks))
-       :value nil
-       :error (or (some-> index chunks second str/trim not-empty)
-                  "The evaluation failed.")})))
-
 (defn- abandon!
   "Gives up on the eval `id`: asks the image to interrupt it, gives it a
    few seconds to say that the eval is done and discards the connection.
@@ -445,16 +401,16 @@
          running (obtain w timeout-ms)
          chunks (atom [])
          failure (fn [message]
-                   {:out (printed @chunks) :value nil :error message})]
+                   {:out (:out (nrepl/outcome @chunks nil)) :value nil :error message})]
      (if (:session/error running)
        (failure (:session/error running))
        (try
          (let [connection (borrow! running)
                id (str (random-uuid))]
            (try
-             (let [result (converse! connection id code deadline chunks)]
+             (let [result (nrepl/converse! connection id (nrepl/wrapped code) deadline chunks)]
                (give-back! running connection)
-               (outcome @chunks result))
+               (nrepl/outcome @chunks result))
              (catch java.net.SocketTimeoutException _
                (abandon! connection id)
                (failure (str "The image did not answer within " timeout-ms " ms.")))
