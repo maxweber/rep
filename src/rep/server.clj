@@ -291,6 +291,10 @@
    :rep/url-seconds   how long a signed URL holds
    :rep/grace-ms      how long a POST waits for the evaluation before it
                       answers \"running\" and streams
+   :rep/keep-days     how many days the request, the output and the outcome
+                      of an evaluation stay on disk, 7. The server deletes
+                      older ones when it starts and once a day. 0 keeps
+                      them for good
 
    One shared image, see `rep.image`:
 
@@ -341,18 +345,60 @@
             :rep/max-body max-body
             :rep/url-seconds 900
             :rep/grace-ms 1000
+            :rep/keep-days evaluation/keep-days
             :rep/lock (Object.)
+            :rep/sweeper (atom nil)
             :rep/sessions (atom {})
             :rep/image (atom {:image/generation 0 :image/seen {}})
             :rep/evaluations (atom {})}
            (dissoc options :rep/dir :rep/state-dir :rep/token :rep/secret))))
+
+(def sweep-ms
+  "How long the sweeper waits between two sweeps: a day."
+  (* 24 60 60 1000))
+
+(defn- sweep!
+  "One sweep of the stored evaluations. A sweep that breaks says so on
+   standard error and takes nothing down with it."
+  [w]
+  (try
+    (evaluation/sweep! w)
+    (catch Throwable e
+      (binding [*out* *err*]
+        (println "rep: could not delete old evaluations:" (or (ex-message e) (.getName (class e))))))))
+
+(defn start-sweeper!
+  "Deletes the evaluations that are older than `:rep/keep-days` now and
+   then once a day, on a thread of its own, until `stop!`. `start!` calls
+   this. A host that mounts `handle` in its own HTTP server calls it on
+   the prepared system itself. A second call replaces the thread of the
+   first. Answers `w`."
+  [{:rep/keys [sweeper] :as w}]
+  (let [stop (promise)
+        thread (doto (Thread. (fn []
+                                (loop []
+                                  (sweep! w)
+                                  (when (= ::again (deref stop sweep-ms ::again))
+                                    (recur)))))
+                 (.setDaemon true)
+                 (.start))
+        [earlier _] (reset-vals! sweeper {:sweeper/stop stop :sweeper/thread thread})]
+    (some-> earlier :sweeper/stop (deliver true))
+    w))
+
+(defn- stop-sweeper!
+  [{:rep/keys [sweeper]}]
+  (when sweeper
+    (let [[running _] (reset-vals! sweeper nil)]
+      (some-> running :sweeper/stop (deliver true)))))
 
 (defn start!
   "Starts the HTTP server of a prepared system and adds `:rep/server`.
    `:rep/port` becomes the port it listens on, which matters for port 0.
    The handler and the hooks get the system as this function answers it.
    With `:rep/shared-image?` it also starts the image and waits until
-   that runs, see `rep.image/start!`."
+   that runs, see `rep.image/start!`. It deletes the evaluations that
+   are older than `:rep/keep-days` and goes on doing so once a day."
   [{:rep/keys [port ip max-body shared-image?] :as w}]
   (let [system (promise)
         server (http/run-server (fn [request] (handle @system request))
@@ -365,16 +411,19 @@
                  :rep/server server
                  :rep/port (http/server-port server))]
     (deliver system w)
+    (start-sweeper! w)
     (cond-> w
       shared-image? (image/start!))))
 
 (defn stop!
   "Stops the HTTP server, when the system has one, and ends the processes
    of the sessions and the shared image with its supervision. What still
-   ran in them fails, and gets a moment to record that."
+   ran in them fails, and gets a moment to record that. Ends the daily
+   sweep as well."
   [{:rep/keys [server evaluations] :as w}]
   (when server
     (http/server-stop! server))
+  (stop-sweeper! w)
   (session/stop-all! w)
   (image/stop! w)
   (loop [waited 0]

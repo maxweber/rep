@@ -3,7 +3,8 @@
    the output and a status, and while it runs a thread of its own that
    talks to the session's babashka over nREPL. The id in the URL names
    it. A second request with the same id never runs the code again, it
-   gets the answer of the first.
+   gets the answer of the first. `sweep!` deletes the folders of the
+   evaluations that are older than `:rep/keep-days`.
 
    The babashka is the session's own process, or with
    `:rep/shared-image?` the one image that all sessions share."
@@ -272,10 +273,65 @@
                :else
                (start! w request))))))
 
+(def keep-days
+  "How many days an evaluation stays on disk when the system names no
+   `:rep/keep-days`."
+  7)
+
+(defn- last-mattered
+  "The millisecond the evaluation in the folder `dir` ended, else the
+   one it started, else the one its folder last changed."
+  [dir]
+  (let [record (try
+                 (edn/read-string (slurp (fs/file dir "status.edn")))
+                 (catch Exception _ nil))]
+    (or (:ended record)
+        (:started record)
+        (fs/file-time->millis (fs/last-modified-time dir)))))
+
+(defn- drop-empty!
+  "Removes the folder of a session that holds no evaluation any more.
+   Under the lock of `submit!`, so that a new evaluation never loses the
+   folder it is about to write into."
+  [{:rep/keys [lock]} dir]
+  (locking lock
+    (when (empty? (fs/list-dir dir))
+      (fs/delete dir))))
+
+(defn sweep!
+  "Deletes the evaluations that ended more than `:rep/keep-days` ago:
+   the folder with the request, the output and the outcome. An id that
+   old is forgotten, the same POST would run its code again. The clock
+   is `:rep/now-ms` in epoch milliseconds, the system's clock without
+   it. An evaluation that runs right now stays, and so does everything
+   when `:rep/keep-days` is 0. A session whose last evaluation went
+   loses its folder too, so it counts as new when it shows up again.
+   Answers how many evaluations it deleted."
+  [{:rep/keys [state-dir now-ms] :as w}]
+  (let [days (or (:rep/keep-days w) keep-days)
+        before (- (or now-ms (System/currentTimeMillis)) (* days 24 60 60 1000))
+        sessions (fs/path state-dir "sessions")]
+    (if (and (pos? days) (fs/directory? sessions))
+      (reduce
+       (fn [deleted session-dir]
+         (let [session (fs/file-name session-dir)
+               old (->> (fs/list-dir session-dir)
+                        (filter fs/directory?)
+                        (remove #(running w session (fs/file-name %)))
+                        (filter #(< (last-mattered %) before)))]
+           (run! fs/delete-tree old)
+           (drop-empty! w session-dir)
+           (+ deleted (count old))))
+       0
+       (filter fs/directory? (fs/list-dir sessions)))
+      0)))
+
 (comment
   (require '[rep.server :as server])
   (def w (server/prepare {:rep/dir "work"
                           :rep/after-evaluation (fn [_w info] (prn info))}))
+  (sweep! w)
+  (sweep! (assoc w :rep/now-ms (+ (System/currentTimeMillis) (* 8 24 60 60 1000))))
   (def answer (submit! w {:request/session "s1" :request/id "e1"
                           :request/body "(+ 1 2)"}))
   @(:evaluation/done (:submit/evaluation answer))

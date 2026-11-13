@@ -7,6 +7,7 @@
             [org.httpkit.server :as http-server]
             [rep.admin :as admin]
             [rep.auth :as auth]
+            [rep.evaluation :as evaluation]
             [rep.server :as server]
             [rep.session :as session]))
 
@@ -359,6 +360,80 @@
                 (evaluate w session "(+ 1 2)"))
               (is (< (- (System/currentTimeMillis) begun) 600)
                   (str "twenty evaluations, shared image " shared?)))))))))
+
+(def day-ms
+  (* 24 60 60 1000))
+
+(defn wait-until
+  "Asks `ready?` every 20 ms until it says yes, ten seconds at most.
+   True when it did."
+  [ready?]
+  (let [deadline (+ (System/currentTimeMillis) 10000)]
+    (loop []
+      (cond
+        (ready?) true
+        (< (System/currentTimeMillis) deadline) (do
+                                                  (Thread/sleep 20)
+                                                  (recur))
+        :else false))))
+
+(deftest sweep-test
+  (with-system {}
+    (fn [w]
+      (let [session (uuid)
+            old (uuid)
+            now (System/currentTimeMillis)
+            folder #(fs/path (:rep/state-dir w) "sessions" session %)
+            at #(assoc w :rep/now-ms (+ now (* % day-ms)))]
+        (evaluate w session "(+ 1 2)" {:id old})
+        (testing "an evaluation stays for :rep/keep-days, seven of them"
+          (is (= 7 (:rep/keep-days w)))
+          (is (= 0 (evaluation/sweep! (at 6))))
+          (is (fs/exists? (folder old)))
+          (is (= "replayed" (get (:headers (evaluate w session "(+ 1 2)" {:id old})) "rep-evaluation"))))
+        (testing "one that still runs stays, however old it is"
+          (let [busy (uuid)
+                hung (future (evaluate w session "(println \"begun\") (Thread/sleep 20000)" {:id busy}))
+                output (fs/file (folder busy) "output")]
+            (is (wait-until #(and (fs/exists? output) (= "begun\n" (slurp output)))))
+            (is (= 1 (evaluation/sweep! (at 8))) "the old one went")
+            (is (not (fs/exists? (folder old))))
+            (is (fs/exists? (folder busy)))
+            (is (fs/exists? (fs/parent (folder busy))) "and the session keeps its folder")
+            (evaluate w session "(System/exit 0)")
+            (deref hung 5000 nil)))
+        (testing "an id that was deleted runs its code again"
+          (is (= "new" (get (:headers (evaluate w session "(+ 1 2)" {:id old})) "rep-evaluation"))))
+        (testing "a session whose last evaluation went loses its folder"
+          (is (pos? (evaluation/sweep! (at 30))))
+          (is (not (fs/exists? (fs/parent (folder old))))))
+        (testing ":rep/keep-days 0 keeps everything"
+          (evaluate w session "(+ 1 2)" {:id old})
+          (is (= 0 (evaluation/sweep! (assoc (at 400) :rep/keep-days 0))))
+          (is (fs/exists? (folder old)))))))
+  (testing "the server sweeps when it starts"
+    (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
+          options {:rep/dir folder :rep/port 0 :rep/token token}
+          session (uuid)
+          old (uuid)
+          fresh (uuid)
+          before (server/start! (server/prepare options))
+          status (fs/file (:rep/state-dir before) "sessions" session old "status.edn")]
+      (try
+        (evaluate before session "(+ 1 2)" {:id old})
+        (evaluate before session "(+ 2 3)" {:id fresh})
+        (server/stop! before)
+        (spit status (pr-str (assoc (edn/read-string (slurp status))
+                                    :ended (- (System/currentTimeMillis) (* 8 day-ms)))))
+        (let [after (server/start! (server/prepare options))]
+          (try
+            (is (wait-until #(not (fs/exists? (fs/parent status)))))
+            (is (fs/exists? (fs/path (:rep/state-dir after) "sessions" session fresh)))
+            (finally
+              (server/stop! after))))
+        (finally
+          (server/stop! before)
+          (fs/delete-tree folder))))))
 
 (deftest help-test
   (with-system {}

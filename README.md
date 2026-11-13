@@ -223,6 +223,11 @@ The client makes a fresh id for every call and reuses it when it asks again. A
 model should not invent ids by hand. If it repeats one, an old answer comes
 back as if it were new.
 
+The server keeps an evaluation for seven days (`:rep/keep-days`). It deletes
+older ones when it starts and once a day after that. An id that old is
+forgotten: the same POST would run its code again. `:rep/keep-days 0` keeps
+everything.
+
 ## Files
 
 `(upload-url "in/clip.mp4")` answers a URL that takes a PUT.
@@ -343,7 +348,9 @@ the handler and passes on the requests that are rep's.
 `rep-path?` is true for `/login`, `/logout` and everything below `/rep/` and
 `/file/`. It is false for `/`, where the host has its own page. The host's
 server has to be http-kit, because a long evaluation streams its output over
-an http-kit channel.
+an http-kit channel. The host gives its server the limit for a request body
+itself, `(:rep/max-body w)` is rep's. `(rep/start-sweeper! w)` starts the
+daily deletion of old evaluations, which `rep/start!` does by itself.
 
 ## One shared image
 
