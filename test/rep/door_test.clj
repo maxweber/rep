@@ -1,7 +1,9 @@
 (ns rep.door-test
-  "The listener in front of http-kit: a file of any size in one GET with
-   its length and with flat memory, a client that hangs up, and
-   everything else passed on to http-kit as it is."
+  "The listener in front of http-kit, which is on only for who asks for
+   it: a file of any size in one GET with its length and with flat
+   memory, a client that hangs up, and everything else passed on to
+   http-kit as it is. And the default without the door: a file above
+   2 GB comes in parts."
   (:require [babashka.fs :as fs]
             [babashka.http-client :as http]
             [clojure.edn :as edn]
@@ -85,8 +87,12 @@
                               (catch Exception _ nil)))
                    (fs/list-dir "/proc/self/fd")))))
 
+(def ^:private door-on
+  "The option that puts the door in front of http-kit."
+  {:rep/door? true})
+
 (deftest large-file-test
-  (with-system {}
+  (with-system door-on
     (fn [w]
       (let [bytes (* 4500 megabyte)
             stored (fs/file (:rep/dir w) "out" "large.bin")
@@ -120,7 +126,7 @@
 (deftest slices-test
   (let [local (random-file! (+ (* 3 megabyte) 1234) 31)]
     (try
-      (with-system {:rep/slice-bytes 4096}
+      (with-system (assoc door-on :rep/slice-bytes 4096)
         (fn [w]
           (fs/create-dirs (fs/path (:rep/dir w) "out"))
           (fs/copy local (fs/path (:rep/dir w) "out" "sliced.bin"))
@@ -171,7 +177,7 @@
      :body (String. (read-exactly in (or length 0)) "UTF-8")}))
 
 (deftest hang-up-test
-  (with-system {}
+  (with-system door-on
     (fn [w]
       (when (fs/exists? "/proc/self/fd")
         (let [stored (fs/file (:rep/dir w) "out" "large.bin")
@@ -191,7 +197,7 @@
             (is (wait-until #(= before (count @connections))))))))))
 
 (deftest passing-on-test
-  (with-system {}
+  (with-system door-on
     (fn [w]
       (spit (fs/file (:rep/dir w) "note.txt") "a note")
       (let [url (download-url w "note.txt")
@@ -251,25 +257,68 @@
   (is (nil? (door/parse-head "hello there\r\n\r\n")))
   (is (nil? (door/parse-head "GET / HTTP/2.0\r\n\r\n"))))
 
-(deftest without-the-door-test
-  (testing "a host that mounts the handler in its own http-kit, without the door"
+(defn- above-two-gigabytes-test
+  "What a server without the door answers for the file `out/large.bin`
+   of 2.5 GB behind `url`, whose first megabyte is `first-part`."
+  [url first-part]
+  (let [bytes (* 2500 megabyte)]
+    (testing "a plain GET gets a 400 that names the size and says how to fetch the file, not http-kit's 500"
+      (let [answer (http/get url {:throw false})]
+        (is (= 400 (:status answer)))
+        (is (str/includes? (:body answer) (str "out/large.bin holds " bytes " bytes")))
+        (is (str/includes? (:body answer) "above 2 GB in parts only"))
+        (is (str/includes? (:body answer) "rep download out/large.bin"))
+        (is (str/includes? (:body answer) "Range header"))))
+    (testing "a HEAD gets the status of that GET"
+      (is (= 400 (:status (http/head url {:throw false})))))
+    (testing "a Range gets its part, from the start and from behind the 2 GB"
+      (let [answer (http/get url {:headers {"Range" "bytes=0-9"} :as :bytes :throw false})]
+        (is (= 206 (:status answer)))
+        (is (= (str "bytes 0-9/" bytes) (get (:headers answer) "content-range")))
+        (is (= (vec (take 10 first-part)) (vec (:body answer)))))
+      (let [start (* 2400 megabyte)
+            answer (http/get url {:headers {"Range" (str "bytes=" start "-" (+ start 9))} :as :bytes :throw false})]
+        (is (= 206 (:status answer)))
+        (is (= (str "bytes " start "-" (+ start 9) "/" bytes) (get (:headers answer) "content-range")))
+        (is (= (repeat 10 0) (vec (:body answer))))))))
+
+(deftest default-test
+  (testing "the door is off unless asked for"
+    (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))]
+      (try
+        (is (false? (:rep/door? (server/prepare {:rep/dir folder :rep/token server-test/token}))))
+        (finally
+          (fs/delete-tree folder))))
+    (is (= {:rep/door? true} (server/cli-options ["--door"])))
+    (is (= {} (server/cli-options []))))
+  (with-system {}
+    (fn [w]
+      (testing "without the door http-kit itself has the port"
+        (is (nil? (:rep/door w)))
+        (is (= (:rep/port w) (http-server/server-port (:rep/server w)))))
+      (testing "a file below 2 GB comes whole in one GET, with its length"
+        (spit (fs/file (:rep/dir w) "note.txt") "a note")
+        (let [answer (http/get (download-url w "note.txt") {:throw false})]
+          (is (= 200 (:status answer)))
+          (is (= "6" (get (:headers answer) "content-length")))
+          (is (= "a note" (:body answer))))
+        (let [answer (http/head (download-url w "note.txt") {:throw false})]
+          (is (= 200 (:status answer)))
+          (is (= "6" (get (:headers answer) "content-length")))))
+      (let [[first-part _] (sparse-file! (fs/file (:rep/dir w) "out" "large.bin") (* 2500 megabyte))]
+        (above-two-gigabytes-test (download-url w "out/large.bin") first-part)))))
+
+(deftest host-without-the-door-test
+  (testing "a host that mounts the handler in its own http-kit answers the same"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
           system (server/prepare {:rep/dir folder :rep/token server-test/token})
           host (http-server/run-server (fn [request] (server/handle system request))
                                        {:port 0 :ip "127.0.0.1" :legacy-return-value? false})
-          stored (fs/file folder "out" "large.bin")
-          [first-part _] (sparse-file! stored (* 2500 megabyte))
+          [first-part _] (sparse-file! (fs/file folder "out" "large.bin") (* 2500 megabyte))
           url (files/url system {:url/method "GET" :url/path "out/large.bin" :url/seconds 60
                                  :url/base (str "http://127.0.0.1:" (http-server/server-port host))})]
       (try
-        (testing "a file above 2 GB gets a 400 that says to ask in parts, not http-kit's 500"
-          (let [answer (http/get url {:throw false})]
-            (is (= 400 (:status answer)))
-            (is (str/includes? (:body answer) "above 2 GB in parts only"))))
-        (testing "and comes in parts"
-          (let [answer (http/get url {:headers {"Range" "bytes=0-9"} :as :bytes :throw false})]
-            (is (= 206 (:status answer)))
-            (is (= (vec (take 10 first-part)) (vec (:body answer))))))
+        (above-two-gigabytes-test url first-part)
         (finally
           (http-server/server-stop! host)
           (server/stop! system)

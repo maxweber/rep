@@ -1,10 +1,17 @@
 (ns rep.door
-  "The listener in front of http-kit. It is there for one reason: a
-   file of any size has to come down in one plain GET, with its length
-   in `Content-Length`, while the server's memory stays flat.
+  "The listener in front of http-kit, for whoever turns it on with
+   `:rep/door?`. It is there for one reason: a file of any size comes
+   down in one plain GET, with its length in `Content-Length`, while
+   the server's memory stays flat.
 
-   http-kit cannot do that, which the source says and a probe
-   confirmed (babashka 1.13, http-kit 2.9):
+   It is off by default. The door is an HTTP listener of our own in
+   front of every request on the public port, and that job usually
+   belongs to a proven server. Without the door a plain GET sends a
+   file up to 2 GB, and a larger one comes in parts with `Range`, which
+   `rep download` does.
+
+   http-kit cannot send a larger file in one answer, which the source
+   says and a probe confirmed (babashka 1.13, http-kit 2.9):
 
    - A response that does not stream takes its `Content-Length` from
      one `ByteBuffer`, and a `ByteBuffer` ends at 2 GB. A `File` above
@@ -15,9 +22,10 @@
      it. A channel also has no way to wait for the client: what is sent
      faster than the client reads is queued.
 
-   So the door listens on the public address, and http-kit listens on a
-   port of 127.0.0.1 behind it. The door reads the head of every
-   request of a connection and does one of two things with it.
+   So with the door on, the door listens on the public address, and
+   http-kit listens on a port of 127.0.0.1 behind it. The door reads
+   the head of every request of a connection and does one of two
+   things with it.
 
    A GET or a HEAD of a path that `:door/own?` claims, the file routes,
    it answers itself. It calls the same ring handler http-kit would

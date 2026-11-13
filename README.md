@@ -276,19 +276,19 @@ Two more things keep an upload in parts safe:
   is over and off the record. While no upload is on record, a part without an
   id is taken as before, and so is a plain PUT of a whole file.
 
-A plain GET answers the whole file, however large, with its length in
-`Content-Length`, and a HEAD answers the length alone. http-kit cannot send
-such an answer: it refuses a file above 2 GB, maps a smaller one into memory
-whole, and sends a stream chunked, without a `Content-Length`. So rep's server
-has a listener of its own in front of http-kit, the door (`rep.door`). The
-door answers a GET of a file itself, slice by slice, with a write that waits
-for the client, and holds one megabyte of the file at a time
-(`:rep/slice-bytes`). Every other request it passes on to http-kit as it is.
+A plain GET answers the whole file with its length in `Content-Length`, and a
+HEAD answers the length alone. That holds for a file up to 2 GB. http-kit
+sends the answer and sets the limit: it puts the body into one buffer, and a
+buffer ends at 2 GB. A plain GET of a larger file gets a 400 that names the
+size and says how to fetch the file: in parts, which `rep download` does. A
+HEAD of such a file gets the same 400. The door, below, lifts the limit for
+whoever turns it on.
 
 A GET with a `Range` header answers 206 with that part of the file, at most
-8 MB of it, and `Content-Range` says how many bytes the file has. The range is
-`bytes=<start>-<end>` or `bytes=<start>-`. Every other shape, and a range that
-names no byte of the file, is a 416.
+8 MB of it, and `Content-Range` says how many bytes the file has. That works
+for a file of any size. The range is `bytes=<start>-<end>` or
+`bytes=<start>-`. Every other shape, and a range that names no byte of the
+file, is a 416.
 
 The client does both:
 
@@ -312,6 +312,34 @@ bin/rep download --resume out/final.mp4 final.mp4  # goes on from the bytes that
 A download writes to `final.mp4.part` and renames it at the end, so a download
 that breaks leaves no half `final.mp4`. `--resume` goes on from the part file,
 and without one it takes `final.mp4` itself for the part that came so far.
+
+### The door, for a file above 2 GB in one GET
+
+```
+bb serve --door
+```
+
+`REP_DOOR=1` and the option `:rep/door? true` do the same. With the door a
+plain GET answers a file of any size in one request, with its length in
+`Content-Length`, and the server holds one megabyte of the file at a time
+(`:rep/slice-bytes`). That is for a browser or a `curl` that has to fetch a
+large file in one request. `rep download` needs no door, it fetches a file of
+any size in parts.
+
+The door (`rep.door`) is a listener of rep's own in front of http-kit. It has
+the public port, and http-kit listens on a port of 127.0.0.1 behind it. The
+door answers a GET or a HEAD of a file itself, slice by slice, with a write
+that waits for the client. Every other request it passes on to http-kit as it
+is. http-kit cannot send such an answer: it refuses a file above 2 GB, maps a
+smaller one into memory whole, and sends a stream chunked, without a
+`Content-Length`.
+
+The door is off by default, and here is why: it is our own HTTP listener in
+front of everything, and that job usually belongs to a proven server. With the
+door on, every request to the public port passes code that has seen far less
+traffic than http-kit. Without it nothing of `rep.door` is in the path of a
+request. So turn it on when you need the one thing it does, and read its
+limits under "Limits" first.
 
 ## The client
 
@@ -366,6 +394,7 @@ More options for a host. The docstring of `rep.server/prepare` has the rest.
 | `:rep/class-path` | A vector of paths that the session's babashka gets on its classpath, after the server's own. `bb serve --class-path a,b` sets it from the command line. |
 | `:rep/setup-ms` | How long the setup of a fresh process may take, the prelude included. 60000 by default. |
 | `:rep/shared-image?` | All sessions evaluate in one process, see the next section. |
+| `:rep/door?` | Puts `rep.door` in front of http-kit, for a plain GET of a file above 2 GB. Off by default, see "The door". |
 | `:rep/after-evaluation` | `(fn [w evaluation])`. Runs after every evaluation of a POST. `evaluation` has `:evaluation/session`, `:evaluation/id`, `:evaluation/state`, which is `:done` or `:failed`, `:evaluation/exit` and `:evaluation/code`. |
 | `:rep/on-image-start` | `(fn [w image])`. Runs after every start of the shared image that worked, its setup code included. `image` has `:image/generation`, `:image/pid`, `:image/port` and `:image/start-ms`. |
 
@@ -390,9 +419,11 @@ A host that serves files of the work folder under a credential of its own, a
 cookie say, answers them with `(rep.files/serve w request path)`. It applies
 the path checks of the signed route and answers a `Range` the same way.
 
-A plain GET of a file above 2 GB needs the door in front of the host's
-http-kit as well, because the body of that answer is the `File` and http-kit
-cannot send it:
+A plain GET through the host's http-kit sends a file up to 2 GB. A larger one
+gets a 400 that says to fetch it in parts, and a `Range` works for any size. A
+host that wants a file above 2 GB in one GET puts the door in front of its
+http-kit, as `bb serve --door` does. Read "The door" above first, it is off by
+default for a reason:
 
 ```clojure
 (require '[rep.door :as door])
@@ -406,8 +437,7 @@ cannot send it:
 ```
 
 `:door/own?` says for a path whether the door answers a GET of it itself, by
-calling `handler`. Without the door such a GET gets a 400 that says to ask in
-parts.
+calling `handler`.
 
 `rep-path?` is true for `/login`, `/logout` and everything below `/rep/` and
 `/file/`. It is false for `/`, where the host has its own page. The host's
@@ -537,6 +567,11 @@ tell it otherwise.
 - One evaluation may write 10 MB of output. Then the server interrupts it and
   it fails with a line that says so.
 - Signed URLs work until they expire, more than once.
+- A plain GET sends a file up to 2 GB. A larger one comes in parts with
+  `Range`, which `rep download` does, or in one GET with the door on.
+- The door, when it is on, is an HTTP listener of our own in front of every
+  request. Its tests are all the traffic it has seen, where a proven server
+  has had years of it. That is why it is off by default.
 - The door gives every connection a thread, and a second one once the
   connection talks to http-kit. It serves 1024 connections at once and closes
   one more. A client that stops reading in the middle of a download holds its

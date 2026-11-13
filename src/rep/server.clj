@@ -292,6 +292,14 @@
                       larger file comes in parts, see `rep.files/store!`
    :rep/max-file-mb   how many megabytes a file may grow to through its
                       parts, 4096. A part that would pass that is a 413
+   :rep/door?         true puts `rep.door` in front of http-kit, so that a
+                      plain GET sends a file of any size with its length.
+                      Off by default, also `REP_DOOR=1` and `bb serve
+                      --door`. The door is a listener of our own in front
+                      of every request, a job that usually belongs to a
+                      proven server, so it is for whoever needs it. Without
+                      it a plain GET sends a file up to 2 GB, a larger one
+                      comes in parts with `Range`, as `rep download` asks
    :rep/slice-bytes   how much of a file the door holds at a time while a
                       GET fetches it whole, one megabyte, see `rep.door`
    :rep/url-seconds   how long a signed URL holds
@@ -343,6 +351,7 @@
             :rep/prelude (env "REP_PRELUDE")
             :rep/setup-ms session/setup-ms
             :rep/shared-image? (contains? #{"1" "true"} (env "REP_SHARED_IMAGE"))
+            :rep/door? (contains? #{"1" "true"} (env "REP_DOOR"))
             :rep/backoff-ms 100
             :rep/backoff-max-ms 5000
             :rep/port (or (some-> (env "REP_PORT") parse-long) 8730)
@@ -402,44 +411,53 @@
       (some-> running :sweeper/stop (deliver true)))))
 
 (defn file-path?
-  "True for the path of a signed file URL. `rep.door` answers a GET of
-   such a path itself, so that a file of any size comes down in one
-   request."
+  "True for the path of a signed file URL. With `:rep/door?` the door
+   answers a GET of such a path itself, so that a file of any size comes
+   down in one request."
   [uri]
   (str/starts-with? (str uri) "/file/"))
 
-(defn start!
-  "Starts the HTTP server of a prepared system and adds `:rep/server`
-   and `:rep/door`. `:rep/port` becomes the port it listens on, which
-   matters for port 0. The handler and the hooks get the system as this
-   function answers it. With `:rep/shared-image?` it also starts the
-   image and waits until that runs, see `rep.image/start!`. It deletes
-   the evaluations that are older than `:rep/keep-days` and goes on
-   doing so once a day.
+(defn- listen!
+  "Starts what listens on `:rep/ip` and `:rep/port` and answers
+   `:rep/server`, http-kit's server, `:rep/port`, the port that took the
+   requests of the outside, and with the door `:rep/door`.
 
-   The port belongs to the door, `rep.door`, and http-kit listens on a
-   port of 127.0.0.1 behind it. The door answers a GET of a file itself
-   and passes every other request on, because http-kit cannot send a
-   file above 2 GB with its length."
-  [{:rep/keys [port ip max-body shared-image? slice-bytes] :as w}]
+   Without `:rep/door?`, the default, that is http-kit alone, and
+   nothing of `rep.door` is in the path of a request. With it the port
+   belongs to the door and http-kit listens on a port of 127.0.0.1
+   behind it."
+  [{:rep/keys [port ip max-body door? slice-bytes]} handler]
+  (let [options {:thread 16
+                 :max-body max-body
+                 :legacy-return-value? false}]
+    (if door?
+      (let [server (http/run-server handler (assoc options :port 0 :ip "127.0.0.1"))
+            entrance (door/start! (cond-> {:door/ip ip
+                                           :door/port port
+                                           :door/inner-port (http/server-port server)
+                                           :door/handler handler
+                                           :door/own? file-path?}
+                                    slice-bytes (assoc :door/slice-bytes slice-bytes)))]
+        {:rep/server server
+         :rep/door entrance
+         :rep/port (:door/port entrance)})
+      (let [server (http/run-server handler (assoc options :port port :ip ip))]
+        {:rep/server server
+         :rep/port (http/server-port server)}))))
+
+(defn start!
+  "Starts the HTTP server of a prepared system and adds `:rep/server`.
+   `:rep/port` becomes the port it listens on, which matters for port 0.
+   The handler and the hooks get the system as this function answers it.
+   With `:rep/shared-image?` it also starts the image and waits until
+   that runs, see `rep.image/start!`. It deletes the evaluations that
+   are older than `:rep/keep-days` and goes on doing so once a day.
+
+   With `:rep/door?` it puts `rep.door` in front of http-kit and adds
+   `:rep/door`. The door is off unless asked for, see `prepare`."
+  [{:rep/keys [shared-image?] :as w}]
   (let [system (promise)
-        handler (fn [request] (handle @system request))
-        server (http/run-server handler
-                                {:port 0
-                                 :ip "127.0.0.1"
-                                 :thread 16
-                                 :max-body max-body
-                                 :legacy-return-value? false})
-        entrance (door/start! (cond-> {:door/ip ip
-                                       :door/port port
-                                       :door/inner-port (http/server-port server)
-                                       :door/handler handler
-                                       :door/own? file-path?}
-                                slice-bytes (assoc :door/slice-bytes slice-bytes)))
-        w (assoc w
-                 :rep/server server
-                 :rep/door entrance
-                 :rep/port (:door/port entrance))]
+        w (merge w (listen! w (fn [request] (handle @system request))))]
     (deliver system w)
     (start-sweeper! w)
     (cond-> w
@@ -475,12 +493,14 @@
    :shared-image {:coerce :boolean
                   :desc "All sessions evaluate in one process that starts with the server"}
    :max-body-mb {:coerce :long
-                 :desc "The largest request body in megabytes (32)"}})
+                 :desc "The largest request body in megabytes (32)"}
+   :door {:coerce :boolean
+          :desc "Puts rep's own listener in front of http-kit, for a plain GET of a file above 2 GB"}})
 
 (defn cli-options
   "The options for `prepare` from the arguments of `bb serve`."
   [args]
-  (let [{:keys [port ip dir public-url prelude class-path shared-image max-body-mb]}
+  (let [{:keys [port ip dir public-url prelude class-path shared-image max-body-mb door]}
         (cli/parse-opts args {:spec cli-spec})]
     (cond-> {}
       port (assoc :rep/port port)
@@ -490,11 +510,12 @@
       prelude (assoc :rep/prelude prelude)
       class-path (assoc :rep/class-path (vec (remove str/blank? (str/split class-path #","))))
       shared-image (assoc :rep/shared-image? true)
-      max-body-mb (assoc :rep/max-body (* max-body-mb 1024 1024)))))
+      max-body-mb (assoc :rep/max-body (* max-body-mb 1024 1024))
+      door (assoc :rep/door? true))))
 
 (defn -main
   "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE]
-            [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32]"
+            [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32] [--door]"
   [& args]
   (let [w (-> (cli-options args)
               (prepare)
@@ -503,6 +524,8 @@
     (println (str "Work folder: " (:rep/dir w)))
     (when (:rep/shared-image? w)
       (println "All sessions share one image."))
+    (when (:rep/door? w)
+      (println "The door is on: rep's own listener stands in front of http-kit and sends files of any size."))
     (if (:rep/token w)
       (println "Callers send the static token of REP_TOKEN.")
       (let [code (auth/mint-code! w)]

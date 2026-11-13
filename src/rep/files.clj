@@ -441,16 +441,20 @@
 
    Without a `Range` the answer is the whole file, with the `File`
    itself as the body. Who writes that body decides how large the file
-   may be. `rep.door` stands in front of rep's own server and of
-   nchat's and writes a `File` slice by slice, with a write that waits
-   for the client: a file of any size comes down in one GET with its
-   `Content-Length`, and the server holds one slice of it at a time.
-   The door is there because http-kit cannot do this, see its
-   namespace: http-kit refuses a `File` above 2 GB with a 500, maps a
-   smaller one into memory whole, and sends a stream chunked, without a
-   `Content-Length`. So a request that reached this function through
-   http-kit alone, in a host that mounts the handler without the door,
-   gets a 400 for a file above 2 GB that says to ask in parts."
+   may be.
+
+   http-kit writes it by default, and http-kit sends a file up to 2 GB:
+   it puts the body of an answer into one buffer, refuses a `File` above
+   that with a 500, and has no way to stream with a `Content-Length`.
+   So a plain GET of a larger file is answered here, with a 400 that
+   names the size and says how to fetch the file in parts. A `Range`
+   works for a file of any size.
+
+   With the option `:rep/door?` the door writes it, `rep.door`, a
+   listener of rep's own in front of http-kit: slice by slice, with a
+   write that waits for the client, so a file of any size comes down in
+   one GET with its `Content-Length`. The door marks its requests with
+   `:door/request?`, which is how this function knows who writes."
   [w request path]
   (let [target (target w path)
         headers {"Content-Type" "application/octet-stream"
@@ -479,8 +483,8 @@
 
           (and (< one-buffer-bytes length) (not (:door/request? request)))
           (text 400
-                (str path " holds " length " bytes. This server sends a file above 2 GB in parts only:"
-                     " ask with a Range header, as rep download does.\n"))
+                (str path " holds " length " bytes. This server sends a file above 2 GB in parts only."
+                     " Fetch it with rep download " path " <local file>, or ask with a Range header.\n"))
 
           :else
           {:status 200
