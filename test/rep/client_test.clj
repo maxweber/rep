@@ -35,39 +35,30 @@
       (testing "an error ends with exit code 1"
         (let [{:keys [exit out]} (rep w "(/ 1 0)")]
           (is (= 1 exit))
-          (is (= "Error: Divide by zero\n" out)))))))
+          (is (str/includes? out "Divide by zero")))))))
 
 (deftest bash-test
   (server-test/with-system {}
     (fn [w]
-      (testing "the output of bash comes out as bash wrote it, with its exit code"
-        (is (= {:exit 3 :out "it's \"3\"\n" :err ""}
+      (testing "the output of bash comes out as bash wrote it, its exit code is a value"
+        (is (= {:exit 0 :out "it's \"3\"\n{:exit 3}\n" :err ""}
                (rep w (server-test/bash "echo \"it's \\\"$((1+2))\\\"\"\nexit 3\n"))))))))
 
-(deftest wait-attach-stop-test
+(deftest wait-test
   (server-test/with-system {}
     (fn [w]
       (let [id (server-test/uuid)
-            code (server-test/bash "echo one; sleep 4; echo two")
-            waited (rep w code "--id" id "--wait" "1")]
+            code (server-test/bash "echo one; sleep 5; echo two")
+            waited (rep w code "--id" id "--wait" "2")]
         (testing "the client lets go after the wait, the evaluation goes on"
           (is (= 124 (:exit waited)))
           (is (= "one\n" (:out waited)))
-          (is (str/includes? (:err waited) (str "rep attach " id))))
-        (testing "attach prints it from the start and follows to the end"
-          (is (= {:exit 0 :out "one\ntwo\n" :err ""} (rep w "" "attach" id))))
-        (testing "the same id again answers the same text and says so"
+          (is (str/includes? (:err waited) (str "--id " id))))
+        (testing "the same input with the same id follows it to the end"
           (let [again (rep w code "--id" id)]
-            (is (= "one\ntwo\n" (:out again)))
-            (is (str/includes? (:err again) "nothing ran again")))))
-      (testing "stop"
-        (let [id (server-test/uuid)
-              running (future (rep w (server-test/bash "echo begun; sleep 30") "--id" id))]
-          (Thread/sleep 500)
-          (is (= 0 (:exit (rep w "" "stop" id))))
-          (let [{:keys [exit out]} (deref running 5000 nil)]
-            (is (= 130 exit))
-            (is (= "begun\n" out))))))))
+            (is (= 0 (:exit again)))
+            (is (= "one\ntwo\n{:exit 0}\n" (:out again)))
+            (is (str/includes? (:err again) "nothing ran again"))))))))
 
 (deftest refusal-test
   (server-test/with-system {}

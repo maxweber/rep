@@ -1,14 +1,14 @@
 (ns rep.evaluation
   "One evaluation of a session. It has a folder on disk with the request,
-   the output and a status, and while it runs a thread of its own. The
-   id in the URL names it. A second request with the same id never runs
-   the code again, it gets the answer of the first."
+   the output and a status, and while it runs a thread of its own that
+   talks to the session's babashka over nREPL. The id in the URL names
+   it. A second request with the same id never runs the code again, it
+   gets the answer of the first."
   (:require [babashka.fs :as fs]
-            [babashka.process :as process]
             [clojure.edn :as edn]
-            [rep.context :as context]
+            [rep.nrepl :as nrepl]
             [rep.output :as output]
-            [sci.core :as sci]))
+            [rep.session :as session]))
 
 (defn session-folder
   [{:rep/keys [state-dir]} session]
@@ -52,10 +52,10 @@
 
 (defn status
   "What is known about the evaluation: `:state` is :running, :done,
-   :failed, :stopped or :interrupted, `:exit` its exit code. An evaluation
-   that the record calls running while no thread runs it was cut off by a
-   restart of the server, and nobody knows how far it got. Nil for an id
-   that was never used."
+   :failed or :interrupted, `:exit` is 0 or 1. An evaluation that the
+   record calls running while no thread runs it was cut off by a restart
+   of the server, and nobody knows how far it got. Nil for an id that
+   was never used."
   [w session id]
   (if (running w session id)
     {:state :running}
@@ -64,102 +64,125 @@
         (assoc record :state :interrupted)
         record))))
 
-(defn- busy
-  "The id of the evaluation that runs in `session`, if one does."
-  [{:rep/keys [evaluations]} session]
-  (some (fn [[[running-session id]]]
-          (when (= session running-session)
-            id))
-        @evaluations))
+(defn wrapped
+  "`body` as one form for the session. `load-string` stops at the first
+   error, answers the value of the last form and counts lines as the
+   caller wrote them. Plain nREPL would go on after an error."
+  [body]
+  (str "(load-string " (pr-str body) ")"))
 
-(defn- session-state
-  "What the session is to this server: :continued when its context is in
-   memory, :restarted when only its folder is left, :started when it is new."
-  [{:rep/keys [sessions] :as w} session]
-  (cond
-    (contains? @sessions session) :continued
-    (fs/exists? (session-folder w session)) :restarted
-    :else :started))
+(defn- follow!
+  "Reads the answers to the eval `id` until it is done. What the code
+   prints goes into the output as it comes, the error text of babashka
+   too. Answers `:value`, the printed value of the last form, and
+   `:failed?`."
+  [connection id output]
+  (loop [result {}]
+    (let [{:keys [out err value status] :as message} (nrepl/receive! connection)]
+      (if (not= id (:id message))
+        (recur result)
+        (let [_ (some->> out (output/print! output))
+              _ (some->> err (output/print! output))
+              result (cond-> result
+                       value (assoc :value value)
+                       (some #{"eval-error" "interrupted"} status) (assoc :failed? true))]
+          (if (nrepl/done? message)
+            result
+            (recur result)))))))
 
-(defn- context!
-  "The SCI context of `session`, made on first use."
-  [{:rep/keys [sessions] :as w} session]
-  (or (get @sessions session)
-      (get (swap! sessions assoc session (context/create w)) session)))
+(defn- drain!
+  "Reads on until the eval `id` is done and drops what comes. Gives up
+   after a few seconds without a message."
+  [{:nrepl/keys [socket] :as connection} id]
+  (try
+    (.setSoTimeout socket 5000)
+    (loop []
+      (let [message (nrepl/receive! connection)]
+        (when-not (and (= id (:id message)) (nrepl/done? message))
+          (recur))))
+    (catch java.io.IOException _ nil)))
 
-(defn error-text
-  "What the answer says about an exception, as a REPL would."
+(defn- error-data
+  "The data of the exception that just ended the code, printed, or nil."
+  [connection nrepl-session]
+  (let [value (some :value (nrepl/call! connection {"op" "eval"
+                                                    "session" nrepl-session
+                                                    "code" "(rep.prelude/error-data *e)"}))]
+    (when (and value (not= "nil" value))
+      value)))
+
+(defn- evaluate!
+  "Runs `body` in the session's process and answers the outcome. Every
+   evaluation has a connection and an nREPL session of its own, so that
+   two of them run at the same time."
+  [w {:evaluation/keys [session id output base-url]} body]
+  (let [{:session/keys [port error] :as process} (session/process! w session)]
+    (if error
+      (do
+        (output/print! output (str error "\n"))
+        {:state :failed :exit 1})
+      (let [connection (nrepl/connect port)]
+        (try
+          (let [nrepl-session (nrepl/clone! connection)
+                _ (session/base-url! process connection nrepl-session base-url)
+                _ (nrepl/send! connection {"op" "eval"
+                                           "id" id
+                                           "session" nrepl-session
+                                           "code" (wrapped body)})
+                {:keys [value failed?]} (try
+                                          (follow! connection id output)
+                                          (catch clojure.lang.ExceptionInfo e
+                                            (nrepl/send! connection {"op" "interrupt"
+                                                                     "id" "interrupt"
+                                                                     "session" nrepl-session
+                                                                     "interrupt-id" id})
+                                            (drain! connection id)
+                                            (try
+                                              (nrepl/call! connection {"op" "close" "session" nrepl-session})
+                                              (catch java.io.IOException _ nil))
+                                            (throw e)))
+                outcome (if failed?
+                          (do
+                            (some->> (error-data connection nrepl-session)
+                                     (output/print-line! output))
+                            {:state :failed :exit 1})
+                          (do
+                            (when (and value (not= "nil" value))
+                              (output/print-line! output value))
+                            {:state :done :exit 0}))]
+            (nrepl/call! connection {"op" "close" "session" nrepl-session})
+            outcome)
+          (finally
+            (nrepl/close! connection)))))))
+
+(defn- problem
+  "What the answer says when the evaluation broke outside of the code."
   [e]
-  (let [{:keys [type line column] :as data} (ex-data e)
-        sci? (contains? #{:sci/error :sci.error/parse} type)]
-    (str "Error: " (or (ex-message e) (.getName (class e)))
-         (when (and sci? line)
-           (str " (line " line ", column " column ")"))
-         (when-let [shown (and (not sci?) (not-empty (dissoc data :rep/error)))]
-           (str "\n" (pr-str shown))))))
-
-(defn- stream
-  "An OutputStream that writes into the evaluation's output and refuses
-   once the evaluation was told to stop."
-  [{:evaluation/keys [output stopped?]}]
-  (let [write! (fn [data offset length]
-                 (when @stopped?
-                   (throw (ex-info "Stopped." {:rep/error :stopped})))
-                 (output/write! output data offset length))]
-    (proxy [java.io.OutputStream] []
-      (write
-        ([data]
-         (if (bytes? data)
-           (write! data 0 (alength data))
-           (write! (byte-array [(unchecked-byte data)]) 0 1)))
-        ([data offset length]
-         (write! data offset length))))))
+  (cond
+    (= :output-limit (:rep/error (ex-data e))) nil
+    (instance? java.io.IOException e) "The session's process ended. Its definitions are gone."
+    :else (str "rep: " (or (ex-message e) (.getName (class e))))))
 
 (defn- finish!
-  "Records the outcome and lets everyone who follows go. The first call
-   wins, a later one changes nothing."
+  "Records the outcome and lets everyone who follows go."
   [{:rep/keys [evaluations] :as w}
-   {:evaluation/keys [session id output finished? done record]}
+   {:evaluation/keys [session id output done record]}
    outcome]
-  (when (compare-and-set! finished? false true)
-    (write-record! w session id (merge record outcome {:ended (System/currentTimeMillis)}))
-    (swap! evaluations dissoc [session id])
-    (output/close! output)
-    (deliver done outcome)))
+  (write-record! w session id (merge record outcome {:ended (System/currentTimeMillis)}))
+  (swap! evaluations dissoc [session id])
+  (output/close! output)
+  (deliver done outcome))
 
 (defn- run
-  "The whole life of an evaluation on its thread. The printed text and
-   the value go into the output. As with `bb -e`, nil is not printed. A
-   bash result is not printed either, its text is there already, and its
-   exit code becomes the evaluation's."
-  [w ctx {:evaluation/keys [stopped?] :as evaluation} body]
-  (let [writer (java.io.OutputStreamWriter. (stream evaluation) "UTF-8")
-        outcome (try
-                  (binding [context/*evaluation* evaluation
-                            *out* writer
-                            *err* writer]
-                    (let [value (sci/eval-string* ctx body)]
-                      (when-not (or (nil? value) (context/quiet? value))
-                        (prn value))
-                      (flush)
-                      {:state :done
-                       :exit (if (context/quiet? value)
-                               (:exit value 0)
-                               0)}))
+  "The whole life of an evaluation on its thread."
+  [w {:evaluation/keys [output] :as evaluation} body]
+  (let [outcome (try
+                  (evaluate! w evaluation body)
                   (catch Throwable e
-                    (Thread/interrupted)
-                    (if @stopped?
-                      {:state :stopped :exit 130}
-                      (do
-                        (try
-                          (binding [*out* writer]
-                            (println (error-text e))
-                            (flush))
-                          (catch Throwable _ nil))
-                        {:state :failed :exit 1}))))
-        outcome (if @stopped?
-                  {:state :stopped :exit 130}
-                  outcome)]
+                    (try
+                      (some->> (problem e) (output/print-line! output))
+                      (catch Throwable _ nil))
+                    {:state :failed :exit 1}))]
     (try
       (finish! w evaluation outcome)
       (catch Throwable e
@@ -170,7 +193,7 @@
   "Makes the evaluation's folder and record, and starts its thread."
   [{:rep/keys [evaluations output-limit] :as w}
    {:request/keys [session id body base-url]}]
-  (let [state (session-state w session)
+  (let [state (session/state w session (fs/exists? (session-folder w session)))
         dir (folder w session id)
         record {:state :running
                 :sha256 (sha256 body)
@@ -178,20 +201,15 @@
         _ (fs/create-dirs dir)
         _ (spit (fs/file dir "request") body)
         _ (write-record! w session id record)
+        _ (session/reserve! w session)
         evaluation {:evaluation/session session
                     :evaluation/id id
                     :evaluation/base-url base-url
                     :evaluation/record record
                     :evaluation/output (output/open (output-file w session id) output-limit)
-                    :evaluation/process (atom nil)
-                    :evaluation/thread (atom nil)
-                    :evaluation/stopped? (atom false)
-                    :evaluation/finished? (atom false)
-                    :evaluation/done (promise)}
-        ctx (context! w session)]
+                    :evaluation/done (promise)}]
     (swap! evaluations assoc [session id] evaluation)
-    (reset! (:evaluation/thread evaluation)
-            (future (run w ctx evaluation body)))
+    (future (run w evaluation body))
     {:submit/answer :started
      :submit/session state
      :submit/evaluation evaluation}))
@@ -206,13 +224,12 @@
    :replayed  the id was used before with this very request. Nothing runs
               again, the caller answers from what is there.
    :conflict  the id was used before with another request.
-   :busy      the session runs `:submit/running`. A session evaluates
-              one request at a time."
+
+   A session takes a new request while an earlier one still runs."
   [{:rep/keys [lock] :as w} {:request/keys [session id body] :as request}]
   (locking lock
     (let [known (or (some-> (running w session id) :evaluation/record)
-                    (read-record w session id))
-          running-id (busy w session)]
+                    (read-record w session id))]
       (merge w
              request
              (cond
@@ -222,29 +239,8 @@
                known
                {:submit/answer :replayed}
 
-               running-id
-               {:submit/answer :busy :submit/running running-id}
-
                :else
                (start! w request))))))
-
-(defn stop!
-  "Ends the evaluation `id` of `session` when it runs, and adds
-   `:stop/answer` :stopped, :finished (it was over before) or :unknown.
-   The bash process is killed and the thread interrupted. Code that
-   computes without printing or calling anything does not notice an
-   interrupt. Such an evaluation is recorded as stopped all the same, and
-   its thread is left to itself."
-  [w session id]
-  (if-let [{:evaluation/keys [stopped? process thread done] :as evaluation} (running w session id)]
-    (do
-      (reset! stopped? true)
-      (some-> @process process/destroy-tree)
-      (some-> @thread future-cancel)
-      (when (= ::waiting (deref done 2000 ::waiting))
-        (finish! w evaluation {:state :stopped :exit 130}))
-      (assoc w :stop/answer :stopped))
-    (assoc w :stop/answer (if (read-record w session id) :finished :unknown))))
 
 (comment
   (require '[rep.server :as server])
@@ -253,4 +249,5 @@
                           :request/body "(+ 1 2)"}))
   @(:evaluation/done (:submit/evaluation answer))
   (status w "s1" "e1")
-  (slurp (output-file w "s1" "e1")))
+  (slurp (output-file w "s1" "e1"))
+  (session/stop-all! w))

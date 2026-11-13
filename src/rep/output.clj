@@ -57,6 +57,17 @@
         :else (append! output data offset length))
       nil)))
 
+(defn print!
+  "Appends `text`."
+  [output text]
+  (let [data (.getBytes (str text) "UTF-8")]
+    (write! output data 0 (alength data))))
+
+(defn print-line!
+  "Appends `text` and a line break."
+  [output text]
+  (print! output (str text "\n")))
+
 (defn follow!
   "Sends the output from byte `from` on to `channel`, then every later
    chunk. Closes the channel at once when the output is closed already."

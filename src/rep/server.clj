@@ -1,23 +1,24 @@
 (ns rep.server
   "REP over HTTP: read, eval, print, and the loop stays with the caller.
 
-     POST   /rep/<session>/<id>   evaluates the body, answers its output
-     GET    /rep/<session>/<id>   the output again, or what is left of it
-     DELETE /rep/<session>/<id>   stops the evaluation
-     PUT    /file/<path>?...      a signed upload into the work folder
-     GET    /file/<path>?...      a signed download out of it
+     POST /rep/<session>/<id>   evaluates the body, answers its output
+     PUT  /file/<path>?...      a signed upload into the work folder
+     GET  /file/<path>?...      a signed download out of it
 
-   The body of a POST is Clojure code for the session's SCI context. The
-   answer is plain text: what the code printed and its value, with the
-   output of bash as bash wrote it. The outcome travels in the headers
-   Rep-Status and Rep-Exit, so the text needs no frame around it."
+   The body of the POST is Clojure code for the session, a babashka
+   process of its own. The answer is plain text: what the code printed
+   and the value of its last form, with the output of bash as bash wrote
+   it. The outcome travels in the headers Rep-Status and Rep-Exit, so the
+   text needs no frame around it. The same POST again runs nothing, it
+   answers the same text, from byte `?from=` on when asked."
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [rep.evaluation :as evaluation]
             [rep.files :as files]
-            [rep.output :as output]))
+            [rep.output :as output]
+            [rep.session :as session]))
 
 (def text-headers
   {"Content-Type" "text/plain; charset=utf-8"})
@@ -28,14 +29,14 @@
    "\n"
    ["rep: read, eval, print. You keep the loop."
     ""
-    "POST   /rep/<session-uuid>/<evaluation-uuid>   body = Clojure code, answer = plain text"
-    "GET    /rep/<session-uuid>/<evaluation-uuid>   the output again, ?from=<bytes> for the rest"
-    "DELETE /rep/<session-uuid>/<evaluation-uuid>   stops it"
+    "POST /rep/<session-uuid>/<evaluation-uuid>   body = Clojure code, answer = plain text"
     ""
     "Send the header Authorization: Bearer <token>."
-    "Pick one session uuid and keep it, definitions stay in it."
-    "Use a new evaluation uuid for every new piece of code. The same uuid answers the same text again and runs nothing."
-    "The headers Rep-Status (running, done, failed, stopped, interrupted) and Rep-Exit tell the outcome."
+    "Pick one session uuid and keep it. A session is a babashka process, definitions stay in it."
+    "Use a new evaluation uuid for every new piece of code."
+    "The same uuid with the same code answers the same text again and runs nothing. Add ?from=<bytes> for the rest only."
+    "The headers Rep-Status (running, done, failed, interrupted) and Rep-Exit (0 or 1) tell the outcome."
+    "Long work: start it in a future, keep the result in an atom, ask in a later request."
     "Start with the code (help)."
     ""]))
 
@@ -113,27 +114,15 @@
           (text 409 (str "The evaluation id " id " was used for another request. "
                          "Use a new id for new code.\n"))
 
-          :busy
-          (text 409 (str "The session runs the evaluation " (:submit/running submitted) ". "
-                         "GET it to follow, DELETE it to stop it.\n"))
-
           :replayed
           (answer w request session id (from request) {"Rep-Evaluation" "replayed"})
 
           :started
           (do
             (deref (:evaluation/done (:submit/evaluation submitted)) grace-ms nil)
-            (answer w request session id 0
+            (answer w request session id (from request)
                     {"Rep-Evaluation" "new"
                      "Rep-Session" (name (:submit/session submitted))})))))))
-
-(defn- stop
-  [w session id]
-  (case (:stop/answer (evaluation/stop! w session id))
-    :stopped (text 200 "Stopped.\n" {"Rep-Status" "stopped"})
-    :finished (text 200 "It was over already.\n"
-                    {"Rep-Status" (name (:state (evaluation/status w session id)))})
-    :unknown (text 404 "No such evaluation.\n")))
 
 (defn handle
   "The ring handler."
@@ -158,12 +147,11 @@
       (not (and (parse-uuid session) (parse-uuid id)))
       (text 400 "The session and the evaluation id have to be UUIDs.\n")
 
+      (not= :post request-method)
+      (text 405 "POST the code. The same POST again answers the same text.\n")
+
       :else
-      (case request-method
-        :post (evaluate w request session id)
-        :get (answer w request session id (from request) nil)
-        :delete (stop w session id)
-        (text 405 "POST, GET or DELETE.\n")))))
+      (evaluate w request session id))))
 
 (defn- random-hex
   [length]
@@ -174,17 +162,19 @@
 (defn prepare
   "The system map from the options, the environment and the defaults.
 
-   :rep/dir           the work folder, where bash runs and files live
+   :rep/dir           the work folder, where the sessions run and files live
    :rep/state-dir     where the evaluations are kept, `.rep` in the work folder
    :rep/token         the bearer token. A random one is made when none is set
    :rep/secret        signs the file URLs, derived from the token when not set
    :rep/public-url    how the outside reaches the server, else from the request
-   :rep/namespaces    SCI namespaces the host adds, {namespace {symbol function}}
+   :rep/prelude       a Clojure file every session loads when it starts, for
+                      the functions a host wants to add
    :rep/port :rep/ip  where to listen, 8730 on 127.0.0.1
    :rep/output-limit  the most bytes one evaluation may write
    :rep/max-body      the largest request body, uploads included
    :rep/url-seconds   how long a signed URL holds
-   :rep/grace-ms      how long a POST waits for a quick evaluation to finish"
+   :rep/grace-ms      how long a POST waits for the evaluation before it
+                      answers \"running\" and streams"
   [options]
   (let [env (fn [variable]
               (not-empty (System/getenv variable)))
@@ -198,13 +188,13 @@
             :rep/token-made? (not given)
             :rep/secret (or (env "REP_SECRET") (files/hmac token "rep file urls"))
             :rep/public-url (env "REP_PUBLIC_URL")
-            :rep/namespaces {}
+            :rep/prelude (env "REP_PRELUDE")
             :rep/port (or (some-> (env "REP_PORT") parse-long) 8730)
             :rep/ip (or (env "REP_IP") "127.0.0.1")
             :rep/output-limit (* 10 1024 1024)
             :rep/max-body (* 512 1024 1024)
             :rep/url-seconds 900
-            :rep/grace-ms 100
+            :rep/grace-ms 1000
             :rep/lock (Object.)
             :rep/sessions (atom {})
             :rep/evaluations (atom {})}
@@ -225,26 +215,35 @@
            :rep/port (http/server-port server))))
 
 (defn stop!
-  [{:rep/keys [server] :as w}]
+  "Stops the HTTP server and ends the processes of the sessions. What
+   still ran in them fails, and gets a moment to record that."
+  [{:rep/keys [server evaluations] :as w}]
   (when server
     (http/server-stop! server))
+  (session/stop-all! w)
+  (loop [waited 0]
+    (when (and (seq @evaluations) (< waited 3000))
+      (Thread/sleep 20)
+      (recur (+ waited 20))))
   (dissoc w :rep/server))
 
 (def cli-spec
   {:port {:coerce :long :desc "Port to listen on (8730)"}
    :ip {:desc "Address to listen on (127.0.0.1)"}
    :dir {:desc "Work folder (work)"}
-   :public-url {:desc "How the outside reaches the server"}})
+   :public-url {:desc "How the outside reaches the server"}
+   :prelude {:desc "A Clojure file every session loads when it starts"}})
 
 (defn -main
-  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL]"
+  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE]"
   [& args]
-  (let [{:keys [port ip dir public-url]} (cli/parse-opts args {:spec cli-spec})
+  (let [{:keys [port ip dir public-url prelude]} (cli/parse-opts args {:spec cli-spec})
         w (-> (cond-> {}
                 port (assoc :rep/port port)
                 ip (assoc :rep/ip ip)
                 dir (assoc :rep/dir dir)
-                public-url (assoc :rep/public-url public-url))
+                public-url (assoc :rep/public-url public-url)
+                prelude (assoc :rep/prelude prelude))
               (prepare)
               (start!))]
     (println (str "rep listens on http://" (:rep/ip w) ":" (:rep/port w)))

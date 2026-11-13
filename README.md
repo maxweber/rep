@@ -1,15 +1,16 @@
 # rep
 
 A REPL without the loop. A caller sends Clojure code in an HTTP POST. The
-server evaluates it in a [SCI](https://github.com/babashka/sci) context and
-answers the printed text. The loop stays with the caller.
+server evaluates it in a [babashka](https://babashka.org) process that
+belongs to the caller's session and answers the printed text. The loop stays
+with the caller.
 
 The caller I have in mind is a coding agent such as Claude Code. It already
 knows how to send an HTTP request and how to read bash output. With rep that
 is enough to work on another machine: run code there, keep definitions between
 requests, run bash, move files in and out.
 
-This is an experiment and it runs on [babashka](https://babashka.org) only.
+This is an experiment and it runs on babashka only.
 
 ## Try it
 
@@ -40,49 +41,71 @@ curl -s -H "Authorization: Bearer $REP_TOKEN" \
   "$REP_URL/rep/$SESSION/$(uuidgen)"
 ```
 
-`(help)` lists what the code may call.
+`(help)` tells what a session offers.
 
 ## The protocol
 
-| Request | What it does |
-|---|---|
-| `POST /rep/<session>/<id>` | Evaluates the body and answers its output |
-| `GET /rep/<session>/<id>` | The output again. `?from=<bytes>` answers the rest |
-| `DELETE /rep/<session>/<id>` | Stops the evaluation |
-| `PUT /file/<path>?expires=…&signature=…` | Stores the body as a file in the work folder |
-| `GET /file/<path>?expires=…&signature=…` | Answers a file of the work folder |
-| `GET /` | A short text that explains all of this to an agent |
+There is one call.
 
-`<session>` and `<id>` are UUIDs the caller makes up. The `/rep` requests need
-the header `Authorization: Bearer <token>`.
+```
+POST /rep/<session>/<id>
+Authorization: Bearer <token>
 
-The answer is plain text, in the order things happened: what the code
-printed, then its value as EDN. As with `bb -e`, a `nil` value prints nothing.
-An error prints as `Error: <message>` with line and column when SCI knows
-them.
+<Clojure code>
+```
+
+`<session>` and `<id>` are UUIDs the caller makes up. The answer is plain
+text, in the order things happened: what the code printed, then the value of
+its last form as EDN. As with `bb -e`, a `nil` value prints nothing. An error
+ends the request at its first failing form and prints as babashka prints it,
+with line and column.
 
 The outcome is in the headers, so the text needs no frame around it.
 
 | Header | Values |
 |---|---|
-| `Rep-Status` | `running`, `done`, `failed`, `stopped`, `interrupted` |
-| `Rep-Exit` | `0` when done, `1` when failed, `130` when stopped. After bash, the exit code of bash |
+| `Rep-Status` | `running`, `done`, `failed`, `interrupted` |
+| `Rep-Exit` | `0` when done, `1` when failed |
 | `Rep-Session` | `started`, `continued`, `restarted` |
 | `Rep-Evaluation` | `new`, `replayed` |
 
-A POST waits 100 ms for the evaluation. Most finish in that time and answer
-with `Rep-Status: done`. A longer one answers `Rep-Status: running` and streams
-its output until it ends. Then a `GET` with `?from=<bytes received>` gives the
-final headers.
+A POST waits up to a second for the evaluation. Most finish in that time and
+answer with `Rep-Status: done`. A longer one answers `Rep-Status: running` and
+streams its output until it ends. The same POST again, with
+`?from=<bytes received>`, then gives the final headers.
 
-Other answers: 401 without the token, 400 for ids that are no UUIDs, 404 for an
-id nobody used, 409 for a busy session or a reused id.
+Other answers: 401 without the token, 400 for ids that are no UUIDs, 409 for an
+id that was used with other code, 405 for anything but a POST.
+
+Two more routes move files, see below. `GET /` answers a short text that
+explains all of this to an agent.
+
+## Sessions
+
+A session is a babashka process of its own, started on the session's first
+request. Definitions stay in it. Every request starts in the namespace `user`.
+It is full babashka: `slurp`, `spit`, `future`, atoms, `Thread/sleep`,
+`babashka.fs`, `babashka.process`, `babashka.http-client`. Its working
+directory is the work folder.
+
+rep adds four functions to `user`: `sh`, `upload-url`, `download-url` and
+`help`.
+
+A session takes a second request while the first still runs. They share all
+definitions.
+
+A session lives in memory. When its process ends, or the server restarts, the
+next answer carries `Rep-Session: restarted` and the client says that the
+earlier definitions are gone. Keep what must survive in files.
+
+On my laptop a session starts in about 0.3 seconds and holds about 95 MB. A
+later request takes about 50 ms.
 
 ## Bash
 
 A model learned bash from raw bash output. So the output of a script goes into
-the answer byte for byte, standard error included, with no JSON and no Clojure
-string around it.
+the answer as bash wrote it, standard error included and in order, with no
+JSON and no Clojure string around it.
 
 ```
 bin/rep <<'EOF'
@@ -90,14 +113,13 @@ bin/rep <<'EOF'
 EOF
 ```
 
-`(sh script)` answers `{:exit <code>}`, so code can branch on it. When it is
-the last form, its exit code becomes `Rep-Exit` and the exit code of the
-client. Every call is a new bash process in the work folder. A `cd` or a
-variable does not carry over to the next one.
+`(sh script)` answers `{:exit <code>}`. A script that fails is a value, not an
+error, so code can branch on it. Every call is a new bash process in the work
+folder. A `cd` or a variable does not carry over to the next one.
+`(with-out-str (sh script))` gives the output as a string.
 
 On the way in, the script is a Clojure string, so the caller escapes `"` and
-`\`. There is one kind of body on purpose. A script that is awkward to quote
-goes up as a file and runs from there:
+`\`. A script that is awkward to quote goes up as a file and runs from there:
 
 ```
 URL=$(bin/rep <<'EOF'
@@ -111,61 +133,56 @@ bin/rep <<'EOF'
 EOF
 ```
 
-## Sessions
+## Long work
 
-A session is one SCI context. Definitions stay in it. Every request starts in
-the namespace `user`.
+There is no call to follow or stop an evaluation. Clojure has what it takes.
+Start the work in a future, keep the result in an atom, ask in a later
+request.
 
-The context has no Java classes and no file or process access of its own. What
-reaches the machine goes through six functions: `sh`, `slurp`, `spit`,
-`upload-url`, `download-url` and `help`. `slurp` and `spit` only work inside
-the work folder.
+```
+bin/rep <<'EOF'
+(def result (atom nil))
+(def job (future (reset! result (with-out-str (sh "./render.sh")))))
+EOF
 
-A session runs one evaluation at a time. A second POST while one runs gets a
-409 that names the running id.
+bin/rep <<'EOF'
+[(realized? job) @result]
+EOF
+```
 
-The contexts live in memory. After a restart of the server the first answer of
-an old session carries `Rep-Session: restarted`, and the client says that the
-earlier definitions are gone. Keep what must survive in files.
+`(future-cancel job)` ends it, and the script with it. What a future prints
+after its request ended is lost, so keep it in the atom or in a file.
+
+A request that hangs without a future is not lost either. A second request
+can end the script with `(sh "pkill -f render.sh")`. The last resort is
+`(System/exit 0)`. It ends the session's process, every request in it fails,
+and the next one starts a new process.
+
+The evaluation itself does not depend on the connection that started it. When
+the caller hangs up, it runs on, and the same POST again follows it.
 
 ## Evaluation ids
 
 The id in the URL makes a POST safe to repeat. The server keeps the request,
 the output and the outcome of every evaluation on disk.
 
-- The same id with the same body runs nothing. It answers the first output,
+- The same id with the same code runs nothing. It answers the first output,
   and follows it if the evaluation still runs.
-- The same id with another body is a 409.
-- An evaluation that a restart cut off answers `Rep-Status: interrupted`. The
-  server cannot know how far it got and does not pretend to.
+- The same id with other code is a 409.
+- An evaluation that a restart of the server cut off answers
+  `Rep-Status: interrupted`. The server cannot know how far it got and does not
+  pretend to.
 
-The client makes a fresh id for every call and reuses it when it retries after
-a broken connection. A model should not invent ids by hand. If it repeats
-one, an old answer comes back as if it were new.
-
-## Long work
-
-An evaluation does not depend on the connection that started it. When the
-caller hangs up, it runs on.
-
-```
-bin/rep --wait 100 <<'EOF'
-(sh "./render.sh")
-EOF
-```
-
-After 100 seconds the client prints `rep attach <id>` on standard error and
-ends with 124, the exit code of `timeout`. `rep attach <id>` prints the output
-from the start and follows it to the end. `rep stop <id>` ends it.
-
-This is there because a coding agent's shell tool gives up after a couple of
-minutes, and a render takes longer.
+The client makes a fresh id for every call and reuses it when it asks again. A
+model should not invent ids by hand. If it repeats one, an old answer comes
+back as if it were new.
 
 ## Files
 
 `(upload-url "in/clip.mp4")` answers a URL that takes a PUT.
 `(download-url "out/final.mp4")` answers one for a GET. Both need no token and
-expire after 15 minutes, or after the seconds given as a second argument.
+expire after 15 minutes, or after the seconds given as a second argument. They
+only reach into the work folder.
 
 ```
 bin/rep <<'EOF'
@@ -176,15 +193,18 @@ EOF
 ## The client
 
 ```
-rep [--wait SECONDS] < code   evaluates standard input, prints the answer
-rep attach ID                 follows an evaluation or prints it again
-rep stop ID                   stops an evaluation
-rep session                   prints the session id
+rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer
+rep session                             prints the session id
 ```
 
 It reads `REP_URL` and `REP_TOKEN`. The session id comes from `REP_SESSION` or
 from the file `.rep-session` in the current folder, which the client makes on
 first use. One folder, one session.
+
+It ends with 0 when the code ran through, 1 when it failed and 2 when the
+server refused the request. With `--wait` it lets go after that many seconds
+and ends with 124, the exit code of `timeout`. The evaluation runs on. The same
+input again with the `--id` it names follows it to the end.
 
 Link `bin/rep` into your `PATH`. It finds its sources next to itself.
 
@@ -194,41 +214,45 @@ Link `bin/rep` into your `PATH`. It finds its sources next to itself.
 (require '[rep.server :as rep])
 
 (def system
-  (rep/start!
-   (rep/prepare {:rep/dir "work"
-                 :rep/namespaces {'shop {'price (fn [amount] (* 2 amount))}}})))
+  (rep/start! (rep/prepare {:rep/dir "work"
+                            :rep/prelude "shop.clj"})))
 
 (rep/stop! system)
 ```
 
-`:rep/namespaces` is how a host gives the code more to call. A caller then
-evaluates `(shop/price 21)`. See the docstring of `rep.server/prepare` for the
-other options.
+`:rep/prelude` names a Clojure file that every session loads when it starts.
+That is how a host gives the code more to call. With a `shop.clj` that defines
+the namespace `shop`, a caller evaluates `(shop/price 21)`. See the docstring
+of `rep.server/prepare` for the other options.
 
 ## Limits
 
 rep runs the code it is sent. That is its job, so treat the token like a
-shell login. The SCI context is closed, but `sh` is not a sandbox. Bash runs
-with the rights of the server's user. Run rep on a machine you can throw away.
-It listens on 127.0.0.1 unless you tell it otherwise.
+shell login. A session is full babashka with the rights of the server's user.
+Run rep on a machine you can throw away. It listens on 127.0.0.1 unless you
+tell it otherwise.
 
+- A session does not get the server's token. It does hold the key that signs
+  file URLs, so its code can make such a URL for any file in the work folder.
+- Sessions are never ended for being idle. Each one holds its 95 MB until the
+  server stops.
+- Code that loops without calling anything, such as `(loop [] (recur))`,
+  cannot be stopped from inside the session. `(System/exit 0)` in a second
+  request ends the whole session.
 - http-kit holds a request body in memory. Uploads stop at 512 MB by default,
   which is too little for long footage.
-- A stop kills bash and interrupts the thread. Code that only computes, such as
-  `(loop [] (recur))`, does not notice. The evaluation is recorded as stopped
-  and its thread is left running.
-- One evaluation may write 10 MB of output. Then it fails with a line that
-  says so.
+- One evaluation may write 10 MB of output. Then the server interrupts it and
+  it fails with a line that says so.
 - Signed URLs work until they expire, more than once.
 
 ## What the experiment should answer
 
-- Does an agent get by with this one tool, or does it miss the file tools it
+- Does an agent get by with this one call, or does it miss the file tools it
   was trained on?
 - How often does bash inside a Clojure string go wrong? And does the agent
   find the way around it, a script uploaded as a file, on its own?
-- Does the agent use the session's definitions, or does it put everything into
-  files anyway?
+- Does the agent reach for a future and an atom when work takes long, or does
+  it wait on one request until its own shell tool gives up?
 - Is losing a session on restart a problem in practice?
 
 ## Tests
