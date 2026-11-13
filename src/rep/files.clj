@@ -139,9 +139,13 @@
 
 (defn check
   "Reads a request to `/file/<path>` and adds `:file/path` when its
-   signature holds, else `:file/refused` with the reason."
+   signature holds, else `:file/refused` with the reason. A HEAD goes by
+   the signature of a GET: it tells the length of what a GET would
+   give."
   [w {:keys [request-method uri query-string]}]
-  (let [method (str/upper-case (name request-method))
+  (let [method (if (= :head request-method)
+                 "GET"
+                 (str/upper-case (name request-method)))
         path (relative (decode (subs uri (count "/file/"))))
         parameters (query query-string)
         given (get parameters "signature")
@@ -418,6 +422,11 @@
       (.readFully in buffer)
       buffer)))
 
+(def one-buffer-bytes
+  "The largest file http-kit sends in one answer: it puts the body into
+   one buffer, and a buffer ends at 2 GB."
+  Integer/MAX_VALUE)
+
 (defn serve
   "Answers `request` with the file at `path` of the work folder
    `:rep/dir`, for a caller that has checked who asks: `fetch` after the
@@ -428,7 +437,20 @@
 
      403  the path is no path inside the work folder
      404  there is no such file
-     416  the range is malformed or names no byte of the file"
+     416  the range is malformed or names no byte of the file
+
+   Without a `Range` the answer is the whole file, with the `File`
+   itself as the body. Who writes that body decides how large the file
+   may be. `rep.door` stands in front of rep's own server and of
+   nchat's and writes a `File` slice by slice, with a write that waits
+   for the client: a file of any size comes down in one GET with its
+   `Content-Length`, and the server holds one slice of it at a time.
+   The door is there because http-kit cannot do this, see its
+   namespace: http-kit refuses a `File` above 2 GB with a 500, maps a
+   smaller one into memory whole, and sends a stream chunked, without a
+   `Content-Length`. So a request that reached this function through
+   http-kit alone, in a host that mounts the handler without the door,
+   gets a 400 for a file above 2 GB that says to ask in parts."
   [w request path]
   (let [target (target w path)
         headers {"Content-Type" "application/octet-stream"
@@ -454,6 +476,11 @@
             {:status 206
              :headers (assoc headers "Content-Range" (str "bytes " start "-" end "/" length))
              :body (java.io.ByteArrayInputStream. (read-bytes target start end))})
+
+          (and (< one-buffer-bytes length) (not (:door/request? request)))
+          (text 400
+                (str path " holds " length " bytes. This server sends a file above 2 GB in parts only:"
+                     " ask with a Range header, as rep download does.\n"))
 
           :else
           {:status 200

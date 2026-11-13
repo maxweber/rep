@@ -276,6 +276,15 @@ Two more things keep an upload in parts safe:
   is over and off the record. While no upload is on record, a part without an
   id is taken as before, and so is a plain PUT of a whole file.
 
+A plain GET answers the whole file, however large, with its length in
+`Content-Length`, and a HEAD answers the length alone. http-kit cannot send
+such an answer: it refuses a file above 2 GB, maps a smaller one into memory
+whole, and sends a stream chunked, without a `Content-Length`. So rep's server
+has a listener of its own in front of http-kit, the door (`rep.door`). The
+door answers a GET of a file itself, slice by slice, with a write that waits
+for the client, and holds one megabyte of the file at a time
+(`:rep/slice-bytes`). Every other request it passes on to http-kit as it is.
+
 A GET with a `Range` header answers 206 with that part of the file, at most
 8 MB of it, and `Content-Range` says how many bytes the file has. The range is
 `bytes=<start>-<end>` or `bytes=<start>-`. Every other shape, and a range that
@@ -380,6 +389,25 @@ the handler and passes on the requests that are rep's.
 A host that serves files of the work folder under a credential of its own, a
 cookie say, answers them with `(rep.files/serve w request path)`. It applies
 the path checks of the signed route and answers a `Range` the same way.
+
+A plain GET of a file above 2 GB needs the door in front of the host's
+http-kit as well, because the body of that answer is the `File` and http-kit
+cannot send it:
+
+```clojure
+(require '[rep.door :as door])
+
+(def inner (http/run-server handler {:ip "127.0.0.1" :port 0 :legacy-return-value? false}))
+(def entrance (door/start! {:door/ip "0.0.0.0"
+                            :door/port 8080
+                            :door/inner-port (http/server-port inner)
+                            :door/handler handler
+                            :door/own? rep/file-path?}))
+```
+
+`:door/own?` says for a path whether the door answers a GET of it itself, by
+calling `handler`. Without the door such a GET gets a 400 that says to ask in
+parts.
 
 `rep-path?` is true for `/login`, `/logout` and everything below `/rep/` and
 `/file/`. It is false for `/`, where the host has its own page. The host's
@@ -509,6 +537,13 @@ tell it otherwise.
 - One evaluation may write 10 MB of output. Then the server interrupts it and
   it fails with a line that says so.
 - Signed URLs work until they expire, more than once.
+- The door gives every connection a thread, and a second one once the
+  connection talks to http-kit. It serves 1024 connections at once and closes
+  one more. A client that stops reading in the middle of a download holds its
+  thread and the open file until it hangs up.
+- The door answers a file request when it has read it. A client that sends a
+  request before it has the answer to the one before, which HTTP allows and
+  no browser does, could get the two answers out of order.
 
 ## What the experiment should answer
 

@@ -24,6 +24,7 @@
             [clojure.string :as str]
             [org.httpkit.server :as http]
             [rep.auth :as auth]
+            [rep.door :as door]
             [rep.evaluation :as evaluation]
             [rep.files :as files]
             [rep.image :as image]
@@ -214,7 +215,8 @@
 
      POST /rep/<session>/<id>   evaluates the body, needs the bearer token
      PUT  /file/<path>?...      a signed upload into the work folder
-     GET  /file/<path>?...      a signed download out of it
+     GET  /file/<path>?...      a signed download out of it, HEAD for
+                                its length alone
      POST /login                exchanges a login code for a token
      POST /logout               ends the token it is sent with
      GET  /                     the usage text for an agent
@@ -237,7 +239,7 @@
       (str/starts-with? uri "/file/")
       (case request-method
         :put (files/store! w request)
-        :get (files/fetch w request)
+        (:get :head) (files/fetch w request)
         (text 405 "PUT or GET.\n"))
 
       (= "/login" uri)
@@ -290,6 +292,8 @@
                       larger file comes in parts, see `rep.files/store!`
    :rep/max-file-mb   how many megabytes a file may grow to through its
                       parts, 4096. A part that would pass that is a 413
+   :rep/slice-bytes   how much of a file the door holds at a time while a
+                      GET fetches it whole, one megabyte, see `rep.door`
    :rep/url-seconds   how long a signed URL holds
    :rep/grace-ms      how long a POST waits for the evaluation before it
                       answers \"running\" and streams
@@ -397,24 +401,45 @@
     (let [[running _] (reset-vals! sweeper nil)]
       (some-> running :sweeper/stop (deliver true)))))
 
+(defn file-path?
+  "True for the path of a signed file URL. `rep.door` answers a GET of
+   such a path itself, so that a file of any size comes down in one
+   request."
+  [uri]
+  (str/starts-with? (str uri) "/file/"))
+
 (defn start!
-  "Starts the HTTP server of a prepared system and adds `:rep/server`.
-   `:rep/port` becomes the port it listens on, which matters for port 0.
-   The handler and the hooks get the system as this function answers it.
-   With `:rep/shared-image?` it also starts the image and waits until
-   that runs, see `rep.image/start!`. It deletes the evaluations that
-   are older than `:rep/keep-days` and goes on doing so once a day."
-  [{:rep/keys [port ip max-body shared-image?] :as w}]
+  "Starts the HTTP server of a prepared system and adds `:rep/server`
+   and `:rep/door`. `:rep/port` becomes the port it listens on, which
+   matters for port 0. The handler and the hooks get the system as this
+   function answers it. With `:rep/shared-image?` it also starts the
+   image and waits until that runs, see `rep.image/start!`. It deletes
+   the evaluations that are older than `:rep/keep-days` and goes on
+   doing so once a day.
+
+   The port belongs to the door, `rep.door`, and http-kit listens on a
+   port of 127.0.0.1 behind it. The door answers a GET of a file itself
+   and passes every other request on, because http-kit cannot send a
+   file above 2 GB with its length."
+  [{:rep/keys [port ip max-body shared-image? slice-bytes] :as w}]
   (let [system (promise)
-        server (http/run-server (fn [request] (handle @system request))
-                                {:port port
-                                 :ip ip
+        handler (fn [request] (handle @system request))
+        server (http/run-server handler
+                                {:port 0
+                                 :ip "127.0.0.1"
                                  :thread 16
                                  :max-body max-body
                                  :legacy-return-value? false})
+        entrance (door/start! (cond-> {:door/ip ip
+                                       :door/port port
+                                       :door/inner-port (http/server-port server)
+                                       :door/handler handler
+                                       :door/own? file-path?}
+                                slice-bytes (assoc :door/slice-bytes slice-bytes)))
         w (assoc w
                  :rep/server server
-                 :rep/port (http/server-port server))]
+                 :rep/door entrance
+                 :rep/port (:door/port entrance))]
     (deliver system w)
     (start-sweeper! w)
     (cond-> w
@@ -425,7 +450,9 @@
    of the sessions and the shared image with its supervision. What still
    ran in them fails, and gets a moment to record that. Ends the daily
    sweep as well."
-  [{:rep/keys [server evaluations] :as w}]
+  [{:rep/keys [server door evaluations] :as w}]
+  (when door
+    (door/stop! door))
   (when server
     (http/server-stop! server))
   (stop-sweeper! w)
@@ -435,7 +462,7 @@
     (when (and (seq @evaluations) (< waited 3000))
       (Thread/sleep 20)
       (recur (+ waited 20))))
-  (dissoc w :rep/server))
+  (dissoc w :rep/server :rep/door))
 
 (def cli-spec
   {:port {:coerce :long :desc "Port to listen on (8730)"}
