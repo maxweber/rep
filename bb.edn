@@ -1,0 +1,14 @@
+{:paths ["src"]
+ :tasks
+ {serve {:doc "Starts the server: bb serve --port 8730 --dir work"
+         :requires ([rep.server])
+         :task (apply rep.server/-main *command-line-args*)}
+  test {:doc "Runs the tests"
+        :extra-paths ["test"]
+        :requires ([clojure.test :as test])
+        :task (let [namespaces '[rep.server-test
+                                 rep.client-test]]
+                (apply require namespaces)
+                (let [{:keys [fail error]} (apply test/run-tests namespaces)]
+                  (when (pos? (+ fail error))
+                    (System/exit 1))))}}}
