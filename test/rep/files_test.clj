@@ -66,6 +66,53 @@
   [response]
   (get (:headers response) (str/lower-case files/size-header)))
 
+(deftest links-test
+  (with-system {}
+    (fn [w]
+      (let [work (:rep/dir w)
+            session (uuid)
+            url-for (fn [function path]
+                      (edn/read-string (:body (evaluate w session (str "(" function " " (pr-str path) ")")))))
+            secret (slurp (fs/file (:rep/state-dir w) "secret"))]
+        (fs/create-dirs (fs/path work "in"))
+        (spit (fs/file work "in" "real.txt") "a real file")
+        (fs/create-sym-link (fs/path work "in" "file-link") (fs/path ".." ".rep" "secret"))
+        (fs/create-sym-link (fs/path work "in" "folder-link") (fs/path ".." ".rep"))
+        (fs/create-sym-link (fs/path work "in" "inside-link") "real.txt")
+        (fs/create-sym-link (fs/path work "in" "nowhere-link") (fs/path ".." ".rep" "not-there-yet"))
+        (testing "a link inside the work folder to a file of the state folder is refused, the signing key stays in"
+          (let [answer (http/get (url-for "download-url" "in/file-link") {:throw false})]
+            (is (= 403 (:status answer)))
+            (is (not (str/includes? (:body answer) secret)))))
+        (testing "so is a path through a link to the state folder itself"
+          (let [answer (http/get (url-for "download-url" "in/folder-link/secret") {:throw false})]
+            (is (= 403 (:status answer)))
+            (is (not (str/includes? (:body answer) secret))))
+          (is (= 403 (:status (http/get (url-for "download-url" "in/folder-link/tokens") {:throw false})))))
+        (testing "a write through such a link is refused and changes nothing"
+          (is (= 403 (:status (http/put (url-for "upload-url" "in/file-link") {:body "overwritten" :throw false}))))
+          (is (= 403 (:status (http/put (url-for "upload-url" "in/folder-link/planted") {:body "planted" :throw false}))))
+          (is (= 403 (:status (http/put (str (url-for "upload-url" "in/folder-link/planted") "&offset=0&upload=x")
+                                        {:body "planted" :throw false}))))
+          (is (= secret (slurp (fs/file (:rep/state-dir w) "secret"))))
+          (is (not (fs/exists? (fs/path (:rep/state-dir w) "planted")))))
+        (testing "a link that leads nowhere is refused, a write through it would make a file where it points"
+          (is (= 403 (:status (http/put (url-for "upload-url" "in/nowhere-link") {:body "x" :throw false}))))
+          (is (not (fs/exists? (fs/path (:rep/state-dir w) "not-there-yet")))))
+        (testing "the session's own helper that goes through the same check refuses it too"
+          (let [answer (evaluate w session "(rep.prelude/file-size \"in/file-link\")")]
+            (is (= "failed" (get (:headers answer) "rep-status")))
+            (is (str/includes? (:body answer) "Not a path inside the work folder")))
+          (is (= "11\n" (:body (evaluate w session "(rep.prelude/file-size \"in/inside-link\")")))))
+        (testing "a link that stays inside the work folder works as before"
+          (is (= "a real file" (:body (http/get (url-for "download-url" "in/inside-link") {:throw false}))))
+          (is (= 201 (:status (http/put (url-for "upload-url" "in/inside-link") {:body "written through" :throw false}))))
+          (is (= "written through" (slurp (fs/file work "in" "real.txt")))))
+        (testing "a link that leads out of the work folder is refused, as before"
+          (fs/create-sym-link (fs/path work "in" "way-out") (fs/parent work))
+          (is (= 403 (:status (http/get (url-for "download-url" "in/way-out/anything") {:throw false}))))
+          (is (= 403 (:status (http/put (url-for "upload-url" "in/way-out/planted.txt") {:body "x" :throw false})))))))))
+
 (deftest max-body-test
   (with-system {:rep/max-body (* 64 1024)}
     (fn [w]

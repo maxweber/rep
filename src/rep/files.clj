@@ -15,7 +15,8 @@
 
 (defn relative
   "`path` as a clean path inside the work folder, or nil for a path that
-   is absolute, leaves the folder or points into rep's own `.rep` folder."
+   is absolute, leaves the folder or points into rep's own `.rep` folder.
+   This looks at the name only. `file` looks at where the path leads."
   [path]
   (let [path (str path)]
     (when-not (or (str/blank? path)
@@ -29,24 +30,48 @@
                       (str/starts-with? clean ".rep/"))
           clean)))))
 
-(defn- inside?
-  "True when `target` stays in `dir` after its links are followed. A file
-   that does not exist yet is judged by its nearest folder that does."
-  [dir target]
+(defn- state-folder
+  "The folder rep keeps its own files in, the signing key among them:
+   `:rep/state-dir`, or `.rep` in the work folder without it."
+  [{:rep/keys [dir state-dir]}]
+  (or state-dir (fs/path dir ".rep")))
+
+(defn- within?
+  "True when the real path `real` lies in the folder `dir`, links in
+   `dir` followed. False for a folder that is not there."
+  [dir real]
+  (and (fs/exists? dir)
+       (fs/starts-with? real (fs/real-path dir))))
+
+(defn- allowed?
+  "True when `target` resolves to a place inside the work folder and
+   outside rep's state folder. What counts is the real path, with every
+   link followed: a link in the work folder that leads out of it, or
+   into the state folder, makes its path as forbidden as the place it
+   leads to. A file that does not exist yet is judged by its nearest
+   folder that does. A link that leads nowhere is refused, a write
+   through it would make a file wherever it points."
+  [{:rep/keys [dir] :as w} target]
   (let [existing (->> (iterate fs/parent (fs/absolutize target))
                       (take-while some?)
-                      (filter fs/exists?)
+                      (filter #(fs/exists? % {:nofollow-links true}))
                       (first))]
-    (boolean (and existing
-                  (fs/starts-with? (fs/real-path existing) (fs/real-path dir))))))
+    (boolean
+     (when (and existing (fs/exists? existing))
+       (let [real (fs/real-path existing)]
+         (and (within? dir real)
+              (not (within? (state-folder w) real))))))))
 
 (defn file
   "The file of `path` in the work folder `:rep/dir`. Throws for a path
-   that `relative` refuses or that a link leads out of the folder."
-  [{:rep/keys [dir]} path]
+   that `relative` refuses, and for one that resolves, through a link,
+   to a place outside the work folder or inside rep's state folder.
+   The signed routes, a host's own file route (`serve`) and
+   `rep.prelude/file-size` all come through here."
+  [{:rep/keys [dir] :as w} path]
   (let [clean (relative path)
         target (when clean (fs/path dir clean))]
-    (when-not (and target (inside? dir target))
+    (when-not (and target (allowed? w target))
       (throw (ex-info (str "Not a path inside the work folder: " (pr-str path))
                       {:rep/error :path})))
     (fs/file target)))
@@ -273,6 +298,14 @@
    :no-id (str "An upload writes %s, and this part names none."
                " Send upload=<an id of your own> with offset=0 to start the file over.")})
 
+(defn- target
+  "The file of `path` in the work folder, or nil when `file` refuses
+   the path."
+  [w path]
+  (try
+    (file w path)
+    (catch clojure.lang.ExceptionInfo _ nil)))
+
 (defn- body-length
   "How many bytes the body of `request` has."
   [{:keys [body headers]}]
@@ -316,8 +349,11 @@
       (not (and offset (not (neg? offset))))
       (text 400 "The offset has to be a number of bytes, 0 or more.\n")
 
+      (nil? (target w path))
+      (text 403 "Not a path inside the work folder.\n")
+
       :else
-      (let [target (file w path)
+      (let [target (target w path)
             {:part/keys [size conflict refused too-large]}
             (write-part! w target path {:part/offset offset
                                         :part/body body
@@ -394,9 +430,7 @@
      404  there is no such file
      416  the range is malformed or names no byte of the file"
   [w request path]
-  (let [target (try
-                 (file w path)
-                 (catch clojure.lang.ExceptionInfo _ nil))
+  (let [target (target w path)
         headers {"Content-Type" "application/octet-stream"
                  "Accept-Ranges" "bytes"}]
     (cond

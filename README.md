@@ -233,7 +233,9 @@ everything.
 `(upload-url "in/clip.mp4")` answers a URL that takes a PUT.
 `(download-url "out/final.mp4")` answers one for a GET. Both need no token and
 expire after 15 minutes, or after the seconds given as a second argument. They
-only reach into the work folder.
+only reach into the work folder. What counts is where a path leads: a symbolic
+link in the work folder that leads out of it, or into rep's own `.rep` folder
+with the signing key, is as forbidden as the place it leads to.
 
 ```
 bin/rep <<'EOF'
