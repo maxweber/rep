@@ -19,7 +19,8 @@
    into the server's work folder and out of it. They ask the session
    for a signed URL and send or fetch the file in parts of 8 MB,
    because a server holds a request body in memory and takes no large
-   one."
+   one. A signed URL that runs out in the middle is replaced by a fresh
+   one, and `--resume` goes on with a transfer that was cut."
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
             [babashka.http-client :as http]
@@ -211,11 +212,30 @@
   "How often a part is sent or asked for before the client gives up."
   4)
 
+(def url-tries
+  "How often in a row a transfer asks the session for a fresh signed URL
+   after the server refused the one it has. A signed URL holds for some
+   minutes and a long transfer outlives it, so a refusal in the middle
+   is no reason to stop. Several in a row are."
+  3)
+
 (defn- failure
   "The exception that ends an upload or a download, with a sentence for
    the person at the terminal."
   [sentence]
   (ex-info sentence {:client/failed? true}))
+
+(defn- ask
+  "Evaluates `code` in the session and answers what it printed,
+   trimmed. Throws with `problem` and what the session said when the
+   evaluation failed."
+  [w code problem]
+  (let [out (java.io.ByteArrayOutputStream.)
+        {:client/keys [exit]} (follow w (str (random-uuid)) code out)
+        answer (str/trim (.toString out "UTF-8"))]
+    (when-not (zero? exit)
+      (throw (failure (str problem (when (seq answer) (str ": " answer))))))
+    answer))
 
 (defn- signed-url
   "Asks the session for a signed URL: evaluates `(rep.prelude/<function>
@@ -223,15 +243,21 @@
    server in front, the one it knows it can reach. Throws when the
    session gave none."
   [w function path]
-  (let [out (java.io.ByteArrayOutputStream.)
-        code (str "(print (rep.prelude/" function " " (pr-str (str path)) "))")
-        {:client/keys [exit]} (follow w (str (random-uuid)) code out)
-        answer (str/trim (.toString out "UTF-8"))
+  (let [problem (str "The session gave no URL for " (pr-str (str path)))
+        answer (ask w (str "(print (rep.prelude/" function " " (pr-str (str path)) "))") problem)
         index (str/index-of answer "/file/")]
-    (when-not (and (zero? exit) index)
-      (throw (failure (str "The session gave no URL for " (pr-str (str path))
-                           (when (seq answer) (str ": " answer))))))
+    (when-not index
+      (throw (failure (str problem (when (seq answer) (str ": " answer))))))
     (str (:client/url w) (subs answer index))))
+
+(defn- remote-size
+  "Asks the session how many bytes the file at `path` of the work
+   folder holds, 0 when there is none."
+  [w path]
+  (let [problem (str "The session did not tell the size of " (pr-str (str path)))
+        answer (ask w (str "(print (rep.prelude/file-size " (pr-str (str path)) "))") problem)]
+    (or (parse-long answer)
+        (throw (failure (str problem ": " answer))))))
 
 (defn- with-tries
   "Calls `request` until it answers. A connection that fails is tried
@@ -263,42 +289,80 @@
     (.readFully in buffer)
     buffer))
 
+(defn- put-parts!
+  "Sends the open file `in` from byte `begin` on as the parts of the
+   upload `id`, each to a signed URL that `sign` answers. `takeover?`
+   says that the first part takes over a file another upload began.
+   Answers the bytes the server holds at the end."
+  [in sign id begin takeover?]
+  (let [length (.length in)]
+    (loop [url (sign)
+           offset begin
+           refused 0
+           takeover? takeover?]
+      (let [part (read-part in offset)
+            end (+ offset (alength part))
+            address (str url "&offset=" offset "&upload=" id (when takeover? "&resume=true"))
+            response (with-tries #(http/put address {:body part :throw false}))
+            status (:status response)
+            size (held response)]
+        (cond
+          (and (= 201 status) (= end size))
+          (if (< end length)
+            (recur url end 0 false)
+            size)
+
+          ;; the part arrived and its answer got lost
+          (and (= 409 status) size (< offset size) (<= size length))
+          (if (< size length)
+            (recur url size 0 false)
+            size)
+
+          ;; the signed URL ran out in the middle
+          (and (= 403 status) (< refused url-tries))
+          (recur (sign) offset (inc refused) takeover?)
+
+          :else
+          (throw (failure (str "The upload stopped at byte " offset " (HTTP " status "): "
+                               (str/trim (str (:body response)))))))))))
+
 (defn upload!
   "Sends the local file `local` to `path` of the server's work folder,
-   through a signed URL the session hands out, in parts of `part-bytes`.
-   A part whose answer got lost is not sent twice: the server says how
-   many bytes it holds, and the upload goes on from there. Answers the
-   bytes the file holds at the end. Throws with a sentence when it does
-   not work."
-  [w local path]
-  (when-not (fs/regular-file? local)
-    (throw (failure (str "There is no file " local "."))))
-  (let [url (signed-url w "upload-url" path)]
-    (with-open [in (java.io.RandomAccessFile. (str local) "r")]
-      (let [length (.length in)]
-        (loop [offset 0]
-          (let [part (read-part in offset)
-                end (+ offset (alength part))
-                response (with-tries #(http/put (str url "&offset=" offset) {:body part :throw false}))
-                size (held response)]
-            (cond
-              (and (= 201 (:status response)) (= end size) (< end length))
-              (recur end)
+   through signed URLs the session hands out, in parts of `part-bytes`.
+   Answers the bytes the file holds at the end. Throws with a sentence
+   when it does not work.
 
-              (and (= 201 (:status response)) (= end size))
-              size
+   - A part whose answer got lost is not sent twice: the server says
+     how many bytes it holds, and the upload goes on from there.
+   - A signed URL that runs out in the middle is no end: the client asks
+     the session for a fresh one and goes on at the same offset.
+   - Every part names this upload with an id of its own, so a second
+     upload of the same path is told that another one writes the file.
+   - With `:resume? true` it asks the server how many bytes the file
+     has and sends the rest, for an upload that was cut. It takes the
+     file over from the upload that began it."
+  ([w local path]
+   (upload! w local path nil))
+  ([w local path {:keys [resume?]}]
+   (when-not (fs/regular-file? local)
+     (throw (failure (str "There is no file " local "."))))
+   (with-open [in (java.io.RandomAccessFile. (str local) "r")]
+     (let [length (.length in)
+           begin (if resume? (remote-size w path) 0)]
+       (cond
+         (< length begin)
+         (throw (failure (str "The server holds " begin " bytes of " path ", more than the " length
+                              " bytes of " local ". That is another file. Upload it without --resume.")))
 
-              (and (= 409 (:status response)) size (< offset size) (<= size length))
-              (if (< size length)
-                (recur size)
-                size)
+         (and (pos? begin) (= begin length))
+         length
 
-              :else
-              (throw (failure (str "The upload stopped at byte " offset " (HTTP " (:status response) "): "
-                                   (str/trim (str (:body response)))))))))))))
+         :else
+         (put-parts! in #(signed-url w "upload-url" path) (str (random-uuid)) begin (pos? begin)))))))
 
 (defn- total
-  "The size of the whole file, from the `Content-Range` of a part."
+  "The size of the whole file, from the `Content-Range` of a part or of
+   a 416."
   [response]
   (some->> (get (:headers response) "content-range")
            (re-find #"/(\d+)$")
@@ -306,45 +370,76 @@
            (parse-long)))
 
 (defn- fetch-parts!
-  "Writes the file behind the signed `url` to the stream `out`, one
-   range of `part-bytes` after the other. Answers the bytes it wrote."
-  [url out]
-  (loop [offset 0]
+  "Writes the file behind a signed URL to the stream `out` from byte
+   `begin` on, one range of `part-bytes` after the other. `sign`
+   answers the URL, and a fresh one when the server refuses the one in
+   use. Answers the byte the file ends at."
+  [sign out begin]
+  (loop [url (sign)
+         offset begin
+         refused 0]
     (let [range (str "bytes=" offset "-" (dec (+ offset part-bytes)))
           {:keys [status body] :as response} (with-tries #(http/get url {:headers {"Range" range}
                                                                          :as :bytes
-                                                                         :throw false}))]
-      (case (long status)
-        206 (let [end (+ offset (alength body))]
-              (.write out ^bytes body)
-              (if (and (pos? (alength body)) (< end (or (total response) 0)))
-                (recur end)
-                end))
-        200 (do
-              (.write out ^bytes body)
-              (alength body))
-        416 offset
-        (throw (failure (str "The download stopped at byte " offset " (HTTP " status "): "
-                             (str/trim (String. ^bytes body "UTF-8")))))))))
+                                                                         :throw false}))
+          stop (fn []
+                 (failure (str "The download stopped at byte " offset " (HTTP " status "): "
+                               (str/trim (String. ^bytes body "UTF-8")))))]
+      (cond
+        (= 206 status)
+        (let [end (+ offset (alength body))]
+          (.write out ^bytes body)
+          (if (and (pos? (alength body)) (< end (or (total response) 0)))
+            (recur url end 0)
+            end))
+
+        (and (= 200 status) (zero? offset))
+        (do
+          (.write out ^bytes body)
+          (alength body))
+
+        ;; nothing is left to fetch, unless the local part is longer than the file
+        (and (= 416 status) (<= offset (or (total response) offset)))
+        offset
+
+        (and (= 403 status) (< refused url-tries))
+        (recur (sign) offset (inc refused))
+
+        :else
+        (throw (stop))))))
 
 (defn download!
   "Fetches `path` of the server's work folder into the local file
-   `local`, through a signed URL the session hands out, in parts of
-   `part-bytes`. The parts go to `<local>.part`, which becomes the file
-   when all of them are there, so a download that breaks leaves an
-   earlier `local` as it was. Answers the bytes it wrote. Throws with a
-   sentence when it does not work."
-  [w path local]
-  (let [url (signed-url w "download-url" path)
-        part (str local ".part")]
-    (some-> (fs/parent (fs/absolutize local)) (fs/create-dirs))
-    (try
-      (let [bytes (with-open [out (java.io.FileOutputStream. part)]
-                    (fetch-parts! url out))]
-        (fs/move part local {:replace-existing true})
-        bytes)
-      (finally
-        (fs/delete-if-exists part)))))
+   `local`, through signed URLs the session hands out, in parts of
+   `part-bytes`. Answers the bytes the file has. Throws with a sentence
+   when it does not work.
+
+   The parts go to `<local>.part`, which becomes the file when all of
+   them are there, so a download that breaks leaves an earlier `local`
+   as it was and the part file with what came. A signed URL that runs
+   out in the middle is no end: the client asks for a fresh one and
+   goes on at the same offset.
+
+   With `:resume? true` it goes on from the size of the part file an
+   earlier download left. Without a part file it takes `local` itself
+   for the part that came so far."
+  ([w path local]
+   (download! w path local nil))
+  ([w path local {:keys [resume?]}]
+   (let [part (str local ".part")]
+     (some-> (fs/parent (fs/absolutize local)) (fs/create-dirs))
+     (when (and resume? (not (fs/exists? part)) (fs/regular-file? local))
+       (fs/move local part))
+     (let [begin (if (and resume? (fs/regular-file? part)) (fs/size part) 0)]
+       (try
+         (let [bytes (with-open [out (java.io.FileOutputStream. part (pos? begin))]
+                       (fetch-parts! #(signed-url w "download-url" path) out begin))]
+           (fs/move part local {:replace-existing true})
+           bytes)
+         (catch clojure.lang.ExceptionInfo e
+           (when (and (fs/exists? part) (zero? (fs/size part)))
+             (fs/delete part))
+           (throw e)))))))
 
 (defn- moved
   "Runs the upload or download `move`, says what happened and answers
@@ -385,14 +480,15 @@
    :session-id {:desc "Session id (REP_SESSION, else the file .rep-session)"}
    :url {:desc "Server address (REP_URL, else http://127.0.0.1:8730)"}
    :token {:desc "Bearer token (REP_TOKEN, else the one rep login stored)"}
-   :wait {:coerce :long :desc "Stop following after this many seconds, exit 124"}})
+   :wait {:coerce :long :desc "Stop following after this many seconds, exit 124"}
+   :resume {:coerce :boolean :desc "upload, download: go on where an earlier transfer of the file stopped"}})
 
 (def help
   (str/join
    "\n"
    ["rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer"
-    "rep upload LOCAL PATH                   sends a local file into the work folder, in parts"
-    "rep download PATH LOCAL                 fetches a file of the work folder, in parts"
+    "rep upload [--resume] LOCAL PATH        sends a local file into the work folder, in parts"
+    "rep download [--resume] PATH LOCAL      fetches a file of the work folder, in parts"
     "rep login CODE                          exchanges a login code for a token and stores it"
     "rep logout                              ends the stored token"
     "rep session                             prints the session id"
@@ -421,17 +517,17 @@
           "session" (println (session (:session-id opts)))
           "upload" (if (and argument second-argument)
                      (let [w (in-session w opts)]
-                       (System/exit (moved #(upload! w argument second-argument)
+                       (System/exit (moved #(upload! w argument second-argument {:resume? (:resume opts)})
                                            #(str "Stored " second-argument " (" % " bytes)."))))
                      (do
-                       (note "rep upload LOCAL PATH")
+                       (note "rep upload [--resume] LOCAL PATH")
                        (System/exit 2)))
           "download" (if (and argument second-argument)
                        (let [w (in-session w opts)]
-                         (System/exit (moved #(download! w argument second-argument)
+                         (System/exit (moved #(download! w argument second-argument {:resume? (:resume opts)})
                                              #(str "Fetched " argument " into " second-argument " (" % " bytes)."))))
                        (do
-                         (note "rep download PATH LOCAL")
+                         (note "rep download [--resume] PATH LOCAL")
                          (System/exit 2)))
           nil (let [w (in-session w opts)
                     id (or (:id opts) (str (random-uuid)))
@@ -445,5 +541,7 @@
   (def w (assoc (settings {}) :client/session (session nil)))
   (follow w (str (random-uuid)) "(+ 1 2)")
   (upload! w "clip.mp4" "in/clip.mp4")
+  (upload! w "clip.mp4" "in/clip.mp4" {:resume? true})
   (download! w "out/final.mp4" "final.mp4")
+  (download! w "out/final.mp4" "final.mp4" {:resume? true})
   (token-file "https://machine.example"))

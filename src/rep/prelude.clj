@@ -4,7 +4,8 @@
    already. This namespace adds bash with its output in the answer and
    signed URLs for files. The server loads it when it starts the process
    and refers `sh`, `upload-url`, `download-url` and `help` into `user`."
-  (:require [babashka.process :as process]
+  (:require [babashka.fs :as fs]
+            [babashka.process :as process]
             [rep.files :as files]))
 
 (defonce ^{:doc "What the server told this session: `:secret` signs the
@@ -108,6 +109,16 @@
   ([path] (signed-url "GET" path nil))
   ([path seconds] (signed-url "GET" path seconds)))
 
+(defn file-size
+  "How many bytes the file at `path` in the work folder holds, 0 when
+   there is none. `rep upload --resume` asks this to learn where an
+   upload that was cut goes on."
+  [path]
+  (let [file (files/file {:rep/dir (str (fs/cwd))} path)]
+    (if (fs/regular-file? file)
+      (fs/size file)
+      0)))
+
 (defn error-data
   "The data of the exception `e` when the code itself put it there, for
    the server to show below the error."
@@ -149,4 +160,5 @@
   (with-out-str (sh "echo captured"))
   (binding [*base-url* "http://127.0.0.1:8730"]
     (upload-url "in/clip.mp4"))
-  (download-url "out/final.mp4" 60))
+  (download-url "out/final.mp4" 60)
+  (file-size "in/clip.mp4"))

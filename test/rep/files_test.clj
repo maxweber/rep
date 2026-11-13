@@ -177,6 +177,14 @@
           (let [answer (ask "bytes=10-")]
             (is (= 416 (:status answer)))
             (is (= "bytes */10" (get (:headers answer) "content-range")))))
+        (testing "so is every range that is malformed or names no byte, a number too large for a long too"
+          (doseq [range ["bytes=99999999999999999999-" "bytes=99999999999999999999-99999999999999999999"
+                         "bytes=-5" "bytes=9-3" "bytes=a-b" "items=0-1" "bytes=0-1,4-5" ""]]
+            (let [answer (ask range)]
+              (is (= 416 (:status answer)) (pr-str range))
+              (is (= "bytes */10" (get (:headers answer) "content-range")) (pr-str range)))))
+        (testing "an end that is too large a number counts as the end of the file"
+          (is (= "ij" (:body (ask "bytes=8-99999999999999999999")))))
         (testing "without the header the whole file comes, as before"
           (let [answer (http/get url {:throw false})]
             (is (= 200 (:status answer)))
@@ -185,13 +193,206 @@
 (deftest byte-range-test
   (is (= [0 99] (files/byte-range "bytes=0-99" 1000)))
   (is (= [900 999] (files/byte-range "bytes=900-" 1000)))
-  (is (= :beyond (files/byte-range "bytes=1000-" 1000)))
   (testing "one answer carries at most range-bytes"
     (is (= [0 (dec files/range-bytes)] (files/byte-range "bytes=0-" (* 3 files/range-bytes)))))
-  (testing "no header, or one of another shape, is no range"
-    (is (nil? (files/byte-range nil 1000)))
-    (is (nil? (files/byte-range "bytes=-5" 1000)))
-    (is (nil? (files/byte-range "bytes=9-3" 1000)))))
+  (testing "no header is no range"
+    (is (nil? (files/byte-range nil 1000))))
+  (testing "a header of another shape, and a range that names no byte of the file, cannot be answered"
+    (doseq [header ["bytes=1000-" "bytes=-5" "bytes=9-3" "bytes=99999999999999999999-" "lines=1-2" ""]]
+      (is (= :unsatisfiable (files/byte-range header 1000)) (pr-str header)))
+    (is (= :unsatisfiable (files/byte-range "bytes=0-" 0)) "an empty file has no byte")))
+
+(deftest max-file-test
+  (with-system {:rep/max-file-mb 1}
+    (fn [w]
+      (let [url (upload-url w "in/grows.bin")
+            stored (fs/file (:rep/dir w) "in" "grows.bin")
+            part (byte-array (* 700 1024))]
+        (testing "a file grows through its parts up to :rep/max-file-mb"
+          (is (= 201 (:status (put url part 0)))))
+        (testing "a part that would pass the limit is a 413 with a sentence, and changes nothing"
+          (let [answer (put url part (* 700 1024))]
+            (is (= 413 (:status answer)))
+            (is (= "in/grows.bin would grow past 1 MB, the largest file this server takes in parts (:rep/max-file-mb).\n"
+                   (:body answer))))
+          (is (= (* 700 1024) (fs/size stored))))
+        (testing "a part that still fits is taken"
+          (is (= 201 (:status (put url (byte-array (* 324 1024)) (* 700 1024)))))
+          (is (= megabyte (fs/size stored))))
+        (testing "a first part that is too large alone does not start the file over"
+          (is (= 413 (:status (put url (byte-array (+ megabyte 1)) 0))))
+          (is (= megabyte (fs/size stored)))))))
+  (testing "the limit is 4096 MB when nobody says otherwise"
+    (with-system {}
+      (fn [w]
+        (is (= 4096 files/max-file-mb (:rep/max-file-mb w)))))))
+
+(defn- put-as
+  "PUTs `body` as the part at `offset` of the upload `id`. `more` goes
+   on the end of the query."
+  ([url body offset id]
+   (put-as url body offset id nil))
+  ([url body offset id more]
+   (http/put (str url "&offset=" offset "&upload=" id more) {:body body :throw false})))
+
+(deftest upload-id-test
+  (with-system {}
+    (fn [w]
+      (let [url (upload-url w "in/shared.txt")
+            stored (fs/file (:rep/dir w) "in" "shared.txt")]
+        (testing "the part at offset 0 puts its upload on record, and the upload goes on"
+          (is (= 201 (:status (put-as url "aaa" 0 "upload-a"))))
+          (is (= 201 (:status (put-as url "aaa" 3 "upload-a"))))
+          (is (= "aaaaaa" (slurp stored))))
+        (testing "a part of another upload is a 409 that says so and changes nothing, even at the right offset"
+          (let [answer (put-as url "bbb" 6 "upload-b")]
+            (is (= 409 (:status answer)))
+            (is (str/starts-with? (:body answer) "Another upload writes in/shared.txt."))
+            (is (nil? (size-header answer)) "it is not the 409 of a wrong offset"))
+          (is (= "aaaaaa" (slurp stored))))
+        (testing "the upload on record goes on as if nothing happened"
+          (is (= "9" (size-header (put-as url "aaa" 6 "upload-a")))))
+        (testing "with resume=true another upload takes the file over, and the first one is told"
+          (is (= 201 (:status (put-as url "bbb" 9 "upload-b" "&resume=true"))))
+          (is (= 409 (:status (put-as url "aaa" 12 "upload-a"))))
+          (is (= 201 (:status (put-as url "bbb" 12 "upload-b"))))
+          (is (= "aaaaaaaaabbbbbb" (slurp stored))))
+        (testing "a wrong offset of the right upload is still the 409 that says the size"
+          (is (= "15" (size-header (put-as url "bbb" 99 "upload-b")))))
+        (testing "a part without an id is taken as before"
+          (is (= 201 (:status (put url "ccc" 15))))
+          (is (= "aaaaaaaaabbbbbbccc" (slurp stored))))
+        (testing "offset 0 starts the file over for whoever sends it"
+          (is (= 201 (:status (put-as url "ddd" 0 "upload-d"))))
+          (is (= 409 (:status (put-as url "bbb" 3 "upload-b"))))
+          (is (= "ddd" (slurp stored))))
+        (testing "a first part without an id clears the record, any upload may go on then"
+          (is (= 201 (:status (put url "eee" 0))))
+          (is (= 201 (:status (put-as url "fff" 3 "upload-f"))))
+          (is (= 409 (:status (put-as url "ddd" 6 "upload-d"))))
+          (is (= "eeefff" (slurp stored))))
+        (testing "the record is beside rep's own files, not among the work folder's"
+          (is (= ["shared.txt"] (map fs/file-name (fs/list-dir (fs/parent stored)))))
+          (is (= 1 (count (fs/list-dir (fs/path (:rep/state-dir w) "uploads"))))))
+        (testing "records of uploads that began more than :rep/keep-days ago are deleted"
+          (let [now (System/currentTimeMillis)
+                day (* 24 60 60 1000)]
+            (is (= 0 (files/forget-uploads! (assoc w :rep/now-ms (+ now (* 6 day))))))
+            (is (= 0 (files/forget-uploads! (assoc w :rep/now-ms (+ now (* 400 day)) :rep/keep-days 0))))
+            (is (= 1 (files/forget-uploads! (assoc w :rep/now-ms (+ now (* 8 day))))))
+            (is (= 201 (:status (put-as url "ggg" 6 "upload-g"))) "an upload that still ran goes on under its id")))))))
+
+(defn- slowly
+  "A stand-in for a function of the HTTP client that waits `ms` before
+   every call, as a slow line does, and notes the status of every
+   answer in the atom `seen`."
+  [request ms seen]
+  (fn [url options]
+    (Thread/sleep ms)
+    (let [answer (request url options)]
+      (swap! seen conj (:status answer))
+      answer)))
+
+(defn- cut-after
+  "A stand-in for a function of the HTTP client that lets `n` calls
+   through and breaks the connection of every later one."
+  [request n]
+  (let [calls (atom 0)]
+    (fn [url options]
+      (if (< n (swap! calls inc))
+        (throw (java.io.IOException. "The line is cut."))
+        (request url options)))))
+
+(deftest url-lifetime-test
+  (let [local (random-file! (* 2 megabyte) 15)
+        back (str local ".back")
+        put http/put
+        get http/get]
+    (try
+      (with-system {:rep/url-seconds 1}
+        (fn [w]
+          (let [stored (fs/file (:rep/dir w) "in" "slow.bin")]
+            (testing "an upload that takes longer than a signed URL holds asks for a fresh one and completes"
+              (let [seen (atom [])]
+                (with-redefs [client/part-bytes (* 256 1024)
+                              http/put (slowly put 350 seen)]
+                  (is (= (* 2 megabyte) (client/upload! (as-client w) local "in/slow.bin"))))
+                (is (some #{403} @seen) "the server refused a URL that had run out in the middle")
+                (is (= 8 (count (filter #{201} @seen))) "and no part went twice")
+                (is (= (sha256 local) (sha256 stored)))))
+            (testing "so does a download"
+              (let [seen (atom [])]
+                (with-redefs [client/part-bytes (* 256 1024)
+                              http/get (slowly get 350 seen)]
+                  (is (= (* 2 megabyte) (client/download! (as-client w) "in/slow.bin" back))))
+                (is (some #{403} @seen))
+                (is (= 8 (count (filter #{206} @seen))))
+                (is (= (sha256 local) (sha256 back))))))))
+      (finally
+        (fs/delete-if-exists local)
+        (fs/delete-if-exists back)))))
+
+(deftest resume-test
+  (let [local (random-file! (* 2 megabyte) 16)
+        back (str local ".back")
+        part (str back ".part")
+        put http/put
+        get http/get]
+    (try
+      (with-system {}
+        (fn [w]
+          (let [stored (fs/file (:rep/dir w) "in" "cut.bin")]
+            (testing "an upload that was cut leaves the parts that arrived"
+              (with-redefs [client/part-bytes (* 256 1024)
+                            client/part-tries 1
+                            http/put (cut-after put 3)]
+                (is (thrown-with-msg? clojure.lang.ExceptionInfo #"The server does not answer"
+                                      (client/upload! (as-client w) local "in/cut.bin"))))
+              (is (= (* 3 256 1024) (fs/size stored))))
+            (testing "another upload of the path is told that one writes the file already"
+              (is (= 409 (:status (put-as (upload-url w "in/cut.bin") "x" (* 3 256 1024) "another")))))
+            (testing "with :resume? it asks how much the server has and sends the rest only"
+              (let [seen (atom [])]
+                (with-redefs [client/part-bytes (* 256 1024)
+                              http/put (slowly put 0 seen)]
+                  (is (= (* 2 megabyte) (client/upload! (as-client w) local "in/cut.bin" {:resume? true}))))
+                (is (= (repeat 5 201) @seen) "five parts were left of eight"))
+              (is (= (sha256 local) (sha256 stored))))
+            (testing "a resume of a file that is all there sends nothing"
+              (with-redefs [http/put (fn [& _] (throw (ex-info "Nothing should be sent." {})))]
+                (is (= (* 2 megabyte) (client/upload! (as-client w) local "in/cut.bin" {:resume? true})))))
+            (testing "a resume refuses a file that is longer on the server than here"
+              (spit stored "x" :append true)
+              (is (thrown-with-msg? clojure.lang.ExceptionInfo #"That is another file"
+                                    (client/upload! (as-client w) local "in/cut.bin" {:resume? true})))
+              (client/upload! (as-client w) local "in/cut.bin"))
+            (testing "a download that was cut leaves the part file with what came, and no half file"
+              (with-redefs [client/part-bytes (* 256 1024)
+                            client/part-tries 1
+                            http/get (cut-after get 3)]
+                (is (thrown-with-msg? clojure.lang.ExceptionInfo #"The server does not answer"
+                                      (client/download! (as-client w) "in/cut.bin" back))))
+              (is (= (* 3 256 1024) (fs/size part)))
+              (is (not (fs/exists? back))))
+            (testing "with :resume? it goes on from the part file's size"
+              (let [seen (atom [])]
+                (with-redefs [client/part-bytes (* 256 1024)
+                              http/get (slowly get 0 seen)]
+                  (is (= (* 2 megabyte) (client/download! (as-client w) "in/cut.bin" back {:resume? true}))))
+                (is (= (repeat 5 206) @seen)))
+              (is (= (sha256 local) (sha256 back)))
+              (is (not (fs/exists? part))))
+            (testing "without a part file a resume takes the local file for what came so far"
+              (with-open [out (java.io.FileOutputStream. back)]
+                (.write out (fs/read-all-bytes local) 0 megabyte))
+              (is (= (* 2 megabyte) (client/download! (as-client w) "in/cut.bin" back {:resume? true})))
+              (is (= (sha256 local) (sha256 back))))
+            (testing "a download without :resume? starts over"
+              (spit part "left over from another file")
+              (is (= (* 2 megabyte) (client/download! (as-client w) "in/cut.bin" back)))
+              (is (= (sha256 local) (sha256 back)))))))
+      (finally
+        (run! fs/delete-if-exists [local back part])))))
 
 (deftest command-test
   (let [local (random-file! (* 3 megabyte) 7)
@@ -231,6 +432,22 @@
                 (is (str/includes? err "The session gave no URL"))))
             (testing "a command without its two arguments says how it goes"
               (is (= 2 (:exit (rep "upload" local)))))
+            (testing "rep upload --resume goes on with a file of which the server has the beginning"
+              (let [stored (fs/file (:rep/dir w) "in" "resumed.bin")]
+                (fs/create-dirs (fs/parent stored))
+                (with-open [out (java.io.FileOutputStream. stored)]
+                  (.write out (fs/read-all-bytes local) 0 megabyte))
+                (is (= {:exit 0 :out (str "Stored in/resumed.bin (" (* 3 megabyte) " bytes).\n") :err ""}
+                       (rep "upload" "--resume" local "in/resumed.bin")))
+                (is (= (sha256 local) (sha256 stored)))))
+            (testing "rep download --resume goes on with a local file that has the beginning"
+              (with-open [out (java.io.FileOutputStream. back)]
+                (.write out (fs/read-all-bytes local) 0 megabyte))
+              (is (= 0 (:exit (rep "download" "--resume" "in/clip.bin" back))))
+              (is (= (sha256 local) (sha256 back))))
+            (testing "a download that fails at its first byte leaves no part file"
+              (rep "download" "in/nothing.bin" back)
+              (is (not (fs/exists? (str back ".part")))))
             (testing "an empty file goes both ways"
               (spit local "")
               (is (= 0 (:exit (rep "upload" local "in/empty.bin"))))

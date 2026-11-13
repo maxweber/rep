@@ -259,8 +259,22 @@ Every answer says how many bytes the file holds, in its text and in the header
 size from the 409 and goes on from there. A PUT without `offset` is the whole
 file, as before.
 
+Two more things keep an upload in parts safe:
+
+- A file grows to 4096 MB at most (`:rep/max-file-mb`). A part that would pass
+  that is a 413 with a sentence. A signed URL is good for many parts, so
+  without the limit it could fill the disk.
+- `&upload=<id>` names the upload a part belongs to, an id the sender makes up
+  once per upload. The part at offset 0 puts the id on record. A later part
+  with another id is a 409 without `Rep-File-Size` that says another upload
+  writes the file, so two senders of one path do not mix their parts
+  unnoticed. `&resume=true` on a later part takes the file over for its id.
+  A part without an id is taken as before.
+
 A GET with a `Range` header answers 206 with that part of the file, at most
-8 MB of it, and `Content-Range` says how many bytes the file has.
+8 MB of it, and `Content-Range` says how many bytes the file has. The range is
+`bytes=<start>-<end>` or `bytes=<start>-`. Every other shape, and a range that
+names no byte of the file, is a 416.
 
 The client does both:
 
@@ -270,14 +284,27 @@ bin/rep download out/final.mp4 final.mp4
 ```
 
 It asks the session for the signed URL and sends or fetches the file in parts
-of 8 MB.
+of 8 MB. A signed URL holds for 15 minutes and a long transfer outlives it:
+when the server refuses the URL in the middle, the client asks the session for
+a fresh one and goes on at the same offset.
+
+`--resume` goes on with a transfer that was cut:
+
+```
+bin/rep upload --resume clip.mp4 in/clip.mp4       # asks how many bytes the server has, sends the rest
+bin/rep download --resume out/final.mp4 final.mp4  # goes on from the bytes that are here
+```
+
+A download writes to `final.mp4.part` and renames it at the end, so a download
+that breaks leaves no half `final.mp4`. `--resume` goes on from the part file,
+and without one it takes `final.mp4` itself for the part that came so far.
 
 ## The client
 
 ```
 rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer
-rep upload LOCAL PATH                   sends a local file into the work folder, in parts
-rep download PATH LOCAL                 fetches a file of the work folder, in parts
+rep upload [--resume] LOCAL PATH        sends a local file into the work folder, in parts
+rep download [--resume] PATH LOCAL      fetches a file of the work folder, in parts
 rep login CODE                          exchanges a login code for a token and stores it
 rep logout                              ends the stored token
 rep session                             prints the session id
@@ -344,6 +371,10 @@ the handler and passes on the requests that are rep's.
 
 (rep/stop! w)
 ```
+
+A host that serves files of the work folder under a credential of its own, a
+cookie say, answers them with `(rep.files/serve w request path)`. It applies
+the path checks of the signed route and answers a `Range` the same way.
 
 `rep-path?` is true for `/login`, `/logout` and everything below `/rep/` and
 `/file/`. It is false for `/`, where the host has its own page. The host's

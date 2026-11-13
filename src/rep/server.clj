@@ -288,6 +288,8 @@
                       holds a body in memory before it looks at a route or
                       a credential, and refuses a larger one with a 413. A
                       larger file comes in parts, see `rep.files/store!`
+   :rep/max-file-mb   how many megabytes a file may grow to through its
+                      parts, 4096. A part that would pass that is a 413
    :rep/url-seconds   how long a signed URL holds
    :rep/grace-ms      how long a POST waits for the evaluation before it
                       answers \"running\" and streams
@@ -343,6 +345,7 @@
             :rep/ip (or (env "REP_IP") "127.0.0.1")
             :rep/output-limit (* 10 1024 1024)
             :rep/max-body max-body
+            :rep/max-file-mb files/max-file-mb
             :rep/url-seconds 900
             :rep/grace-ms 1000
             :rep/keep-days evaluation/keep-days
@@ -358,11 +361,13 @@
   (* 24 60 60 1000))
 
 (defn- sweep!
-  "One sweep of the stored evaluations. A sweep that breaks says so on
-   standard error and takes nothing down with it."
+  "One sweep of the stored evaluations and of the records of old
+   uploads. A sweep that breaks says so on standard error and takes
+   nothing down with it."
   [w]
   (try
     (evaluation/sweep! w)
+    (files/forget-uploads! w)
     (catch Throwable e
       (binding [*out* *err*]
         (println "rep: could not delete old evaluations:" (or (ex-message e) (.getName (class e))))))))
