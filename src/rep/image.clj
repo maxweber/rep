@@ -371,6 +371,17 @@
         (discard! connection))))
   nil)
 
+(defn- gone!
+  "Waits a moment until the process of the image `running` is really
+   gone. A connection breaks a little before the process counts as
+   ended. A caller that hears \"the image's process ended\" and calls
+   again at once would else be handed the same dying image and hear it
+   a second time, instead of waiting for the next one."
+  [running]
+  (some-> (:proc (:session/process running))
+          (.waitFor 2 java.util.concurrent.TimeUnit/SECONDS))
+  nil)
+
 (defn evaluate
   "Evaluates `code` in the image, for the host process itself: no HTTP,
    no evaluation id, nothing kept on disk. Blocks until the code is
@@ -418,6 +429,7 @@
                (nrepl/close! connection)
                (throw e))))
          (catch java.io.IOException _
+           (gone! running)
            (failure "The image's process ended.")))))))
 
 (comment
