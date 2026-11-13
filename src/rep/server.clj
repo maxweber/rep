@@ -2,8 +2,10 @@
   "REP over HTTP: read, eval, print, and the loop stays with the caller.
 
      POST /rep/<session>/<id>   evaluates the body, answers its output
-     PUT  /file/<path>?...      a signed upload into the work folder
-     GET  /file/<path>?...      a signed download out of it
+     PUT  /file/<path>?...      a signed upload into the work folder,
+                                with &offset=<n> one part of a large file
+     GET  /file/<path>?...      a signed download out of it, a part of
+                                it with a Range header
 
    The body of the POST is Clojure code for the session, a babashka
    process of its own. The answer is plain text: what the code printed
@@ -30,6 +32,13 @@
 
 (def text-headers
   {"Content-Type" "text/plain; charset=utf-8"})
+
+(def max-body
+  "The largest request body the server takes when the system names no
+   `:rep/max-body`: 32 MB. http-kit holds a body in memory before a
+   route or a credential is looked at, so this is what anybody who
+   reaches the port can make the server hold per connection."
+  (* 32 1024 1024))
 
 (def usage
   "What a GET on / answers, for an agent that only knows the address."
@@ -275,7 +284,10 @@
                       line `--class-path a,b`
    :rep/port :rep/ip  where to listen, 8730 on 127.0.0.1
    :rep/output-limit  the most bytes one evaluation may write
-   :rep/max-body      the largest request body, uploads included
+   :rep/max-body      the largest request body in bytes, 32 MB. The server
+                      holds a body in memory before it looks at a route or
+                      a credential, and refuses a larger one with a 413. A
+                      larger file comes in parts, see `rep.files/store!`
    :rep/url-seconds   how long a signed URL holds
    :rep/grace-ms      how long a POST waits for the evaluation before it
                       answers \"running\" and streams
@@ -326,7 +338,7 @@
             :rep/port (or (some-> (env "REP_PORT") parse-long) 8730)
             :rep/ip (or (env "REP_IP") "127.0.0.1")
             :rep/output-limit (* 10 1024 1024)
-            :rep/max-body (* 512 1024 1024)
+            :rep/max-body max-body
             :rep/url-seconds 900
             :rep/grace-ms 1000
             :rep/lock (Object.)
@@ -380,12 +392,15 @@
    :class-path {:coerce :string
                 :desc "More paths for the classpath of the sessions, separated by commas"}
    :shared-image {:coerce :boolean
-                  :desc "All sessions evaluate in one process that starts with the server"}})
+                  :desc "All sessions evaluate in one process that starts with the server"}
+   :max-body-mb {:coerce :long
+                 :desc "The largest request body in megabytes (32)"}})
 
 (defn cli-options
   "The options for `prepare` from the arguments of `bb serve`."
   [args]
-  (let [{:keys [port ip dir public-url prelude class-path shared-image]} (cli/parse-opts args {:spec cli-spec})]
+  (let [{:keys [port ip dir public-url prelude class-path shared-image max-body-mb]}
+        (cli/parse-opts args {:spec cli-spec})]
     (cond-> {}
       port (assoc :rep/port port)
       ip (assoc :rep/ip ip)
@@ -393,11 +408,12 @@
       public-url (assoc :rep/public-url public-url)
       prelude (assoc :rep/prelude prelude)
       class-path (assoc :rep/class-path (vec (remove str/blank? (str/split class-path #","))))
-      shared-image (assoc :rep/shared-image? true))))
+      shared-image (assoc :rep/shared-image? true)
+      max-body-mb (assoc :rep/max-body (* max-body-mb 1024 1024)))))
 
 (defn -main
   "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE]
-            [--class-path PATH,PATH] [--shared-image]"
+            [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32]"
   [& args]
   (let [w (-> (cli-options args)
               (prepare)

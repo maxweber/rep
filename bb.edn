@@ -1,6 +1,6 @@
 {:paths ["src"]
  :tasks
- {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--class-path a,b] [--shared-image]"
+ {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--class-path a,b] [--shared-image] [--max-body-mb 32]"
          :requires ([rep.server])
          :task (apply rep.server/-main *command-line-args*)}
   code {:doc "Makes a login code: bb code [--dir work]"
@@ -17,6 +17,7 @@
         :requires ([clojure.test :as test])
         :task (let [namespaces '[rep.server-test
                                  rep.client-test
+                                 rep.files-test
                                  rep.image-test]]
                 (apply require namespaces)
                 (let [{:keys [fail error]} (apply test/run-tests namespaces)]

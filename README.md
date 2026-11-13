@@ -236,10 +236,43 @@ bin/rep <<'EOF'
 EOF
 ```
 
+The server holds a request body in memory before it looks at a route or a
+credential. So it takes no body above 32 MB (`:rep/max-body`,
+`bb serve --max-body-mb`) and answers a larger one with a 413. A larger file
+comes in parts through the same signed URL:
+
+```
+PUT /file/<path>?expires=...&signature=...&offset=<n>
+```
+
+- `offset=0` starts the file over.
+- An offset that is the file's size appends the body.
+- Any other offset is a 409 that changes nothing.
+
+Every answer says how many bytes the file holds, in its text and in the header
+`Rep-File-Size`. A caller that lost an answer sends the part again, reads the
+size from the 409 and goes on from there. A PUT without `offset` is the whole
+file, as before.
+
+A GET with a `Range` header answers 206 with that part of the file, at most
+8 MB of it, and `Content-Range` says how many bytes the file has.
+
+The client does both:
+
+```
+bin/rep upload clip.mp4 in/clip.mp4
+bin/rep download out/final.mp4 final.mp4
+```
+
+It asks the session for the signed URL and sends or fetches the file in parts
+of 8 MB.
+
 ## The client
 
 ```
 rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer
+rep upload LOCAL PATH                   sends a local file into the work folder, in parts
+rep download PATH LOCAL                 fetches a file of the work folder, in parts
 rep login CODE                          exchanges a login code for a token and stores it
 rep logout                              ends the stored token
 rep session                             prints the session id
@@ -426,8 +459,10 @@ tell it otherwise.
 - Code that loops without calling anything, such as `(loop [] (recur))`,
   cannot be stopped from inside the session. `(System/exit 0)` in a second
   request ends the whole session.
-- http-kit holds a request body in memory. Uploads stop at 512 MB by default,
-  which is too little for long footage.
+- http-kit holds a request body in memory, whoever sends it: the limit of
+  32 MB holds before the token is checked. That is what one connection can
+  make the server hold. A larger file has to come in parts, which
+  `rep upload` does. `curl -T` with one PUT stops at the limit.
 - One evaluation may write 10 MB of output. Then the server interrupts it and
   it fails with a line that says so.
 - Signed URLs work until they expire, more than once.
