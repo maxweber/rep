@@ -273,6 +273,24 @@ That is how a host gives the code more to call. With a `shop.clj` that defines
 the namespace `shop`, a caller evaluates `(shop/price 21)`. See the docstring
 of `rep.server/prepare` for the other options.
 
+## An example prelude: driving rragent
+
+`examples/rragent.clj` lets a session remote-control the
+[rragent](https://github.com/storrito/rragent) that runs on the same machine.
+Start the server with `--prelude examples/rragent.clj`, then:
+
+```
+bin/rep <<'EOF'
+(rragent/ask! "Which skills do you offer?")
+EOF
+```
+
+`send!` puts a message into the bot's chat the way the page's composer does,
+`ask!` also waits for the answer, `latest` shows the newest messages and
+`busy?` tells whether the bot still works. The file reads rragent's SQLite
+storage directly and posts its page command, so it follows rragent's internals
+and breaks when they change. Treat it as a sketch of the idea.
+
 ## Limits
 
 rep runs the code it is sent. That is its job, so treat the token like a
