@@ -3,9 +3,14 @@
    the output and a status, and while it runs a thread of its own that
    talks to the session's babashka over nREPL. The id in the URL names
    it. A second request with the same id never runs the code again, it
-   gets the answer of the first."
+   gets the answer of the first.
+
+   The babashka is the session's own process, or with
+   `:rep/shared-image?` the one image that all sessions share."
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
+            [rep.hook :as hook]
+            [rep.image :as image]
             [rep.nrepl :as nrepl]
             [rep.output :as output]
             [rep.session :as session]))
@@ -64,13 +69,6 @@
         (assoc record :state :interrupted)
         record))))
 
-(defn wrapped
-  "`body` as one form for the session. `load-string` stops at the first
-   error, answers the value of the last form and counts lines as the
-   caller wrote them. Plain nREPL would go on after an error."
-  [body]
-  (str "(load-string " (pr-str body) ")"))
-
 (defn- follow!
   "Reads the answers to the eval `id` until it is done. What the code
    prints goes into the output as it comes, the error text of babashka
@@ -111,12 +109,37 @@
     (when (and value (not= "nil" value))
       value)))
 
+(defn- session-state
+  "Whether `session` is :started, :continued or :restarted, in its own
+   process or in the shared image."
+  [{:rep/keys [shared-image?] :as w} session]
+  (let [known? (fs/exists? (session-folder w session))]
+    (if shared-image?
+      (image/state w session known?)
+      (session/state w session known?))))
+
+(defn- reserve!
+  "Makes sure that the evaluation of `session` that comes next finds the
+   session :continued."
+  [{:rep/keys [shared-image?] :as w} session]
+  (if shared-image?
+    (image/reserve! w session)
+    (session/reserve! w session)))
+
+(defn- process!
+  "The process that evaluates for `session`: its own, or the shared
+   image. Check the answer for `:session/error`."
+  [{:rep/keys [shared-image?] :as w} session]
+  (if shared-image?
+    (image/process! w session)
+    (session/process! w session)))
+
 (defn- evaluate!
   "Runs `body` in the session's process and answers the outcome. Every
    evaluation has a connection and an nREPL session of its own, so that
    two of them run at the same time."
   [w {:evaluation/keys [session id output base-url]} body]
-  (let [{:session/keys [port error] :as process} (session/process! w session)]
+  (let [{:session/keys [port error] :as process} (process! w session)]
     (if error
       (do
         (output/print! output (str error "\n"))
@@ -128,7 +151,7 @@
                 _ (nrepl/send! connection {"op" "eval"
                                            "id" id
                                            "session" nrepl-session
-                                           "code" (wrapped body)})
+                                           "code" (nrepl/wrapped body)})
                 {:keys [value failed?]} (try
                                           (follow! connection id output)
                                           (catch clojure.lang.ExceptionInfo e
@@ -174,8 +197,10 @@
   (deliver done outcome))
 
 (defn- run
-  "The whole life of an evaluation on its thread."
-  [w {:evaluation/keys [output] :as evaluation} body]
+  "The whole life of an evaluation on its thread. At its end the hook
+   `:rep/after-evaluation` hears about it, once the outcome is on record
+   and everyone who follows has the answer."
+  [w {:evaluation/keys [session id output] :as evaluation} body]
   (let [outcome (try
                   (evaluate! w evaluation body)
                   (catch Throwable e
@@ -187,13 +212,18 @@
       (finish! w evaluation outcome)
       (catch Throwable e
         (binding [*out* *err*]
-          (println "rep: could not record the outcome of" (:evaluation/id evaluation) (ex-message e)))))))
+          (println "rep: could not record the outcome of" (:evaluation/id evaluation) (ex-message e)))))
+    (hook/call! w :rep/after-evaluation {:evaluation/session session
+                                         :evaluation/id id
+                                         :evaluation/state (:state outcome)
+                                         :evaluation/exit (:exit outcome)
+                                         :evaluation/code body})))
 
 (defn- start!
   "Makes the evaluation's folder and record, and starts its thread."
   [{:rep/keys [evaluations output-limit] :as w}
    {:request/keys [session id body base-url]}]
-  (let [state (session/state w session (fs/exists? (session-folder w session)))
+  (let [state (session-state w session)
         dir (folder w session id)
         record {:state :running
                 :sha256 (sha256 body)
@@ -201,7 +231,7 @@
         _ (fs/create-dirs dir)
         _ (spit (fs/file dir "request") body)
         _ (write-record! w session id record)
-        _ (session/reserve! w session)
+        _ (reserve! w session)
         evaluation {:evaluation/session session
                     :evaluation/id id
                     :evaluation/base-url base-url
@@ -244,7 +274,8 @@
 
 (comment
   (require '[rep.server :as server])
-  (def w (server/prepare {:rep/dir "work"}))
+  (def w (server/prepare {:rep/dir "work"
+                          :rep/after-evaluation (fn [_w info] (prn info))}))
   (def answer (submit! w {:request/session "s1" :request/id "e1"
                           :request/body "(+ 1 2)"}))
   @(:evaluation/done (:submit/evaluation answer))

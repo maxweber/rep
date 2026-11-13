@@ -9,7 +9,8 @@
 
 (defonce ^{:doc "What the server told this session: `:secret` signs the
   file URLs and nothing else, `:base-url` is where the caller reached the server,
-  `:url-seconds` how long a URL holds, `:parent` the server's process id."}
+  `:url-seconds` how long a URL holds, `:parent` the server's process id,
+  `:shared-image?` is true in the one process that all sessions share."}
   config
   (atom {}))
 
@@ -112,7 +113,9 @@
   "Prints what a session offers."
   []
   (println "This is babashka. Its namespaces are here: babashka.fs, babashka.process, babashka.http-client, clojure.string and the rest.")
-  (println "Definitions stay for the session. Every request starts in the namespace user.")
+  (if (:shared-image? @config)
+    (println "All callers share this one process, the image. Definitions stay in it, and every caller sees and can redefine them. Every request starts in the namespace user.")
+    (println "Definitions stay for the session. Every request starts in the namespace user."))
   (println "The value of the last form is printed as EDN, nil is not. An error ends the request at once.")
   (println)
   (println "(sh script)")
@@ -127,7 +130,9 @@
   (println "  (def job (future (reset! result (with-out-str (sh \"./render.sh\")))))")
   (println "  later: (realized? job), @result, (future-cancel job)")
   (println "What a future prints after its request ended is lost. Keep it in the atom or in a file.")
-  (println "A second request runs while the first is busy. It can end a hung script with pkill, or the whole session with (System/exit 0)."))
+  (if (:shared-image? @config)
+    (println "A second request runs while the first is busy. It can end a hung script with pkill, or the whole image with (System/exit 0). The image then starts again by itself, without the definitions.")
+    (println "A second request runs while the first is busy. It can end a hung script with pkill, or the whole session with (System/exit 0).")))
 
 (comment
   (configure! {:secret "secret" :url-seconds 900})

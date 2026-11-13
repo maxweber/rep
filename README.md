@@ -127,7 +127,8 @@ A session is a babashka process of its own, started on the session's first
 request. Definitions stay in it. Every request starts in the namespace `user`.
 It is full babashka: `slurp`, `spit`, `future`, atoms, `Thread/sleep`,
 `babashka.fs`, `babashka.process`, `babashka.http-client`. Its working
-directory is the work folder.
+directory is the work folder. A server can also run one process for all
+sessions, see "One shared image" below.
 
 rep adds four functions to `user`: `sh`, `upload-url`, `download-url` and
 `help`.
@@ -270,8 +271,109 @@ Link `bin/rep` into your `PATH`. It finds its sources next to itself.
 
 `:rep/prelude` names a Clojure file that every session loads when it starts.
 That is how a host gives the code more to call. With a `shop.clj` that defines
-the namespace `shop`, a caller evaluates `(shop/price 21)`. See the docstring
-of `rep.server/prepare` for the other options.
+the namespace `shop`, a caller evaluates `(shop/price 21)`.
+
+More options for a host. The docstring of `rep.server/prepare` has the rest.
+
+| Option | What it does |
+|---|---|
+| `:rep/class-path` | A vector of paths that the session's babashka gets on its classpath, after the server's own. |
+| `:rep/shared-image?` | All sessions evaluate in one process, see the next section. |
+| `:rep/after-evaluation` | `(fn [w evaluation])`. Runs after every evaluation of a POST. `evaluation` has `:evaluation/session`, `:evaluation/id`, `:evaluation/state`, which is `:done` or `:failed`, `:evaluation/exit` and `:evaluation/code`. |
+| `:rep/on-image-start` | `(fn [w image])`. Runs after every start of the shared image that worked, its setup code included. `image` has `:image/generation`, `:image/pid`, `:image/port` and `:image/start-ms`. |
+
+Both hooks run in the server's process. The server prints what a hook throws
+to standard error, and the request goes on as if nothing happened.
+
+A host with an HTTP server of its own does not call `rep/start!`. It mounts
+the handler and passes on the requests that are rep's.
+
+```clojure
+(def w (rep/prepare {:rep/dir "work"}))
+
+(defn handler [request]
+  (if (rep/rep-path? (:uri request))
+    (rep/handle w request)
+    (my-own-page request)))
+
+(rep/stop! w)
+```
+
+`rep-path?` is true for `/login`, `/logout` and everything below `/rep/` and
+`/file/`. It is false for `/`, where the host has its own page. The host's
+server has to be http-kit, because a long evaluation streams its output over
+an http-kit channel.
+
+## One shared image
+
+Normally every session has a process of its own. A host that keeps a live
+application in babashka wants one process that lasts, the image, and wants
+every caller to evaluate in it. Then a function that one caller redefines is
+redefined for all.
+
+```
+bb serve --shared-image
+```
+
+`REP_SHARED_IMAGE=1` and the option `:rep/shared-image? true` do the same.
+
+- All session uuids evaluate in the one process. Each evaluation still has a
+  connection and an nREPL session of its own, so two of them run at the same
+  time and each starts in the namespace `user`.
+- The image starts with the server, not with the first request. Its setup
+  code, the `:rep/prelude` file included, runs once per start.
+- The server watches the process. When it ends, by `(System/exit 0)`, a crash
+  or a `kill`, the server starts the next one right away and waits for no
+  request. On my laptop the new image answers about 0.2 seconds after the old
+  one ended. An evaluation that ran in the old image fails with the same line
+  as in a session's own process.
+- An image that fails to start, or ends within five seconds, makes the server
+  pause before the next try. The pause is 100 ms, then twice as long each
+  time, up to five seconds. So a prelude that throws does not spin. A request
+  in that time fails with the reason. `:rep/backoff-ms` and
+  `:rep/backoff-max-ms` set the first and the longest pause.
+- `Rep-Session` keeps its meaning per session uuid. It says `started` for a
+  uuid the server sees for the first time and `continued` afterwards. It says
+  `restarted` when the image started again since that uuid's last evaluation,
+  so its definitions are gone. The server tells by the generation of the
+  image, the count of its starts.
+
+The callers are not kept apart. Each one sees and can redefine what another
+one defined. `(help)` and `GET /` say so.
+
+The host itself evaluates in the image without HTTP.
+
+```clojure
+(require '[rep.image :as image])
+
+(image/evaluate w "(shop/price 21)")
+;; => {:out "" :value "42" :error nil}
+
+(image/evaluate w "(shop/report)" {:timeout-ms 2000})
+
+(image/status w)
+;; => {:image/state :running :image/generation 1 :image/pid 4711 ...}
+```
+
+`:out` is what the code printed. `:value` is the value of the last form as
+`pr-str` wrote it. `:error` is babashka's error text when the code threw, and
+it also tells when the call ran into its timeout or the image is gone. The
+call blocks for `:timeout-ms` at most, 10 seconds without the option. It
+keeps nothing on disk, and it leaves its connection open for the next call,
+so a call takes about 1.5 ms on my laptop. That is cheap enough to ask the
+image after every evaluation, from the hook `:rep/after-evaluation`.
+
+`rep.image/evaluate` throws without `:rep/shared-image?`.
+
+`rep/start!` starts the image and comes back when it runs and
+`:rep/on-image-start` is through. A host that mounts the handler in its own
+HTTP server starts the image itself.
+
+```clojure
+(def w (image/start! (rep/prepare {:rep/dir "work" :rep/shared-image? true})))
+```
+
+`rep/stop!` ends the image and the watch over it in both cases.
 
 ## An example prelude: driving rragent
 

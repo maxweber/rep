@@ -2,7 +2,11 @@
   "The babashka process of a session. Every session gets a process of its
    own with an nREPL server in it. The server talks to it over nREPL, a
    person can attach an editor to the same port. The process keeps the
-   session's definitions, so they are gone when it ends."
+   session's definitions, so they are gone when it ends.
+
+   With `:rep/shared-image?` the sessions get no processes of their own.
+   `rep.image` then starts one for all of them, with `spawn!` and
+   `prepare!` from here."
   (:require [babashka.classpath :as classpath]
             [babashka.fs :as fs]
             [babashka.process :as process]
@@ -41,22 +45,25 @@
       "bb"))
 
 (defn- class-path
-  "The server's classpath with absolute entries. The session starts in
-   the work folder, a relative entry would point somewhere else there."
-  []
-  (->> (str/split (or (classpath/get-classpath) "") (re-pattern fs/path-separator))
+  "The server's classpath and after it the entries of `:rep/class-path`,
+   all of them absolute. The session starts in the work folder, a
+   relative entry would point somewhere else there."
+  [w]
+  (->> (concat (str/split (or (classpath/get-classpath) "") (re-pattern fs/path-separator))
+               (map str (:rep/class-path w)))
        (remove str/blank?)
        (map (comp str fs/absolutize))
        (str/join fs/path-separator)))
 
 (defn- setup-code
   "What a fresh process evaluates before the first request."
-  [{:rep/keys [file-secret url-seconds prelude]}]
+  [{:rep/keys [file-secret url-seconds prelude shared-image?]}]
   (str "(require 'rep.prelude)"
        (pr-str (list 'rep.prelude/configure!
-                     {:secret file-secret
-                      :url-seconds url-seconds
-                      :parent (.pid (java.lang.ProcessHandle/current))}))
+                     (cond-> {:secret file-secret
+                              :url-seconds url-seconds
+                              :parent (.pid (java.lang.ProcessHandle/current))}
+                       shared-image? (assoc :shared-image? true))))
        "(require '[rep.prelude :refer [sh upload-url download-url help]])"
        (when prelude
          (pr-str (list 'load-file (str (fs/absolutize prelude)))))))
@@ -74,7 +81,7 @@
         (recur)))
     (catch java.io.IOException _ nil)))
 
-(defn- end!
+(defn end!
   "Ends the process and waits a moment until it is gone. On its way out
    babashka removes the `.nrepl-port` file it keeps in the work folder,
    and a caller that deletes that folder next should not race with it."
@@ -84,19 +91,26 @@
   (swap! children disj child)
   nil)
 
-(defn- start!
-  "Starts a process for `session` and prepares it. Answers the process
-   with its nREPL port, or `:session/error` with the reason."
-  [{:rep/keys [dir] :as w} session]
+(defn spawn!
+  "Starts a babashka with an nREPL server in the work folder and answers
+   its process. `prepare!` makes it ready for evaluations, `end!` ends
+   it."
+  [{:rep/keys [dir] :as w}]
   (force hook)
-  (let [begun (System/currentTimeMillis)
-        child (process/process {:cmd [(babashka) "-cp" (class-path) "nrepl-server" "127.0.0.1:0"]
+  (let [child (process/process {:cmd [(babashka) "-cp" (class-path w) "nrepl-server" "127.0.0.1:0"]
                                 :dir dir
                                 :err :out
-                                :env (environment (System/getenv))})
-        _ (swap! children conj child)
-        _ (.close (:in child))
-        lines (java.io.BufferedReader. (java.io.InputStreamReader. (:out child) "UTF-8"))
+                                :env (environment (System/getenv))})]
+    (swap! children conj child)
+    (.close (:in child))
+    child))
+
+(defn- ready!
+  "Reads the port from what the fresh process `child` prints first and
+   runs the setup code in it. Answers the process with its nREPL port,
+   or `:session/error` with the reason."
+  [w session child begun]
+  (let [lines (java.io.BufferedReader. (java.io.InputStreamReader. (:out child) "UTF-8"))
         banner (deref (future (.readLine lines)) 15000 nil)
         port (some->> banner (re-find #":(\d+)") (second) (parse-long))]
     (if-not port
@@ -121,6 +135,27 @@
            :session/port port
            :session/base-url (atom nil)
            :session/start-ms (- (System/currentTimeMillis) begun)})))))
+
+(defn prepare!
+  "Makes the process `child` of `spawn!` ready for the evaluations of
+   `session`: waits for its nREPL server and runs the setup code, the
+   prelude included. `begun` is the millisecond its start began. Answers
+   the process with its nREPL port, or `:session/error` with the reason.
+   A process that breaks on the way is ended before the exception goes
+   on."
+  [w session child begun]
+  (try
+    (ready! w session child begun)
+    (catch Throwable e
+      (end! child)
+      (throw e))))
+
+(defn- start!
+  "Starts a process for `session` and prepares it. Answers the process
+   with its nREPL port, or `:session/error` with the reason."
+  [w session]
+  (let [begun (System/currentTimeMillis)]
+    (prepare! w session (spawn! w) begun)))
 
 (defn alive?
   [{:session/keys [process]}]
@@ -192,4 +227,10 @@
   (:session/port session)
   (:session/start-ms session)
   (state w "s1" true)
-  (stop-all! w))
+  (stop-all! w)
+
+  ;; a process that is not kept under a session uuid, with more on its classpath
+  (def child (spawn! (assoc w :rep/class-path ["examples"])))
+  (def started (prepare! w "one-off" child (System/currentTimeMillis)))
+  (alive? started)
+  (end! child))

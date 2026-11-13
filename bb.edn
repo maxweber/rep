@@ -1,6 +1,6 @@
 {:paths ["src"]
  :tasks
- {serve {:doc "Starts the server: bb serve --port 8730 --dir work"
+ {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--shared-image]"
          :requires ([rep.server])
          :task (apply rep.server/-main *command-line-args*)}
   code {:doc "Makes a login code: bb code [--dir work]"
@@ -16,7 +16,8 @@
         :extra-paths ["test"]
         :requires ([clojure.test :as test])
         :task (let [namespaces '[rep.server-test
-                                 rep.client-test]]
+                                 rep.client-test
+                                 rep.image-test]]
                 (apply require namespaces)
                 (let [{:keys [fail error]} (apply test/run-tests namespaces)]
                   (when (pos? (+ fail error))

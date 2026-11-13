@@ -13,7 +13,10 @@
    answers the same text, from byte `?from=` on when asked.
 
      POST /login    body = a login code, answer = a token (see `rep.auth`)
-     POST /logout   ends the token it is sent with"
+     POST /logout   ends the token it is sent with
+
+   With `:rep/shared-image?` all sessions evaluate in one babashka
+   process that starts with the server, see `rep.image`."
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
             [clojure.string :as str]
@@ -21,6 +24,7 @@
             [rep.auth :as auth]
             [rep.evaluation :as evaluation]
             [rep.files :as files]
+            [rep.image :as image]
             [rep.output :as output]
             [rep.session :as session]))
 
@@ -47,6 +51,14 @@
     "The headers Rep-Status (running, done, failed, interrupted) and Rep-Exit (0 or 1) tell the outcome."
     "Long work: start it in a future, keep the result in an atom, ask in a later request."
     "Start with the code (help)."
+    ""]))
+
+(def shared-usage
+  "What a GET on / adds when all sessions share one image."
+  (str/join
+   "\n"
+   ["This server runs one shared image. All session uuids evaluate in the same babashka process."
+    "Every caller sees a definition you make, and another caller can redefine it."
     ""]))
 
 (defn- text
@@ -175,13 +187,43 @@
                     {"Rep-Evaluation" "new"
                      "Rep-Session" (name (:submit/session submitted))})))))))
 
+(defn rep-path?
+  "True when the path `uri` of a request is one of rep's own: `/login`,
+   `/logout` and everything below `/rep/` and `/file/`. A host that owns
+   the HTTP server hands such a request to `handle` and answers every
+   other one itself. `/` is not among them. `handle` answers it with the
+   usage text, but a host has a page of its own there."
+  [uri]
+  (let [uri (str uri)]
+    (or (contains? #{"/login" "/logout"} uri)
+        (str/starts-with? uri "/rep/")
+        (str/starts-with? uri "/file/"))))
+
 (defn handle
-  "The ring handler."
-  [w {:keys [request-method uri] :as request}]
+  "The ring handler. It takes the system `w` and a ring request and
+   answers these paths, every other one with a 404:
+
+     POST /rep/<session>/<id>   evaluates the body, needs the bearer token
+     PUT  /file/<path>?...      a signed upload into the work folder
+     GET  /file/<path>?...      a signed download out of it
+     POST /login                exchanges a login code for a token
+     POST /logout               ends the token it is sent with
+     GET  /                     the usage text for an agent
+
+   `start!` puts it behind an HTTP server of rep's own. A host that
+   owns the HTTP server calls it from its own handler instead, with a
+   system from `prepare`, for the requests that `rep-path?` says are
+   rep's. The request needs `:uri`, `:request-method`, `:headers`,
+   `:query-string`, `:scheme` and `:body` as an input stream, the way
+   http-kit hands them over. An evaluation that takes longer than
+   `:rep/grace-ms` answers with an http-kit channel that streams, so the
+   host's server has to be http-kit for those."
+  [{:rep/keys [shared-image?] :as w} {:keys [request-method uri] :as request}]
   (let [[root session id & more] (rest (str/split uri #"/"))]
     (cond
       (and (= "/" uri) (= :get request-method))
-      (text 200 usage)
+      (text 200 (cond-> usage
+                  shared-image? (str shared-usage)))
 
       (str/starts-with? uri "/file/")
       (case request-method
@@ -225,12 +267,38 @@
    :rep/public-url    how the outside reaches the server, else from the request
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
+   :rep/class-path    a vector of paths that the session's babashka gets on
+                      its classpath, after the server's own
    :rep/port :rep/ip  where to listen, 8730 on 127.0.0.1
    :rep/output-limit  the most bytes one evaluation may write
    :rep/max-body      the largest request body, uploads included
    :rep/url-seconds   how long a signed URL holds
    :rep/grace-ms      how long a POST waits for the evaluation before it
-                      answers \"running\" and streams"
+                      answers \"running\" and streams
+
+   One shared image, see `rep.image`:
+
+   :rep/shared-image?   true lets all sessions evaluate in one process. It
+                        starts with the server, and the server starts it
+                        again whenever it ends. Also `REP_SHARED_IMAGE=1`
+   :rep/backoff-ms      the pause before the next start of an image that
+                        failed to start or ended at once, 100. It doubles
+                        with every further failure
+   :rep/backoff-max-ms  the longest such pause, 5000
+
+   Hooks. Both run in the server's process. The server prints what a hook
+   throws to standard error, and it goes no further:
+
+   :rep/on-image-start    (fn [w image]) after every start of the shared
+                          image that worked, its setup code included. `image`
+                          has :image/generation, :image/pid, :image/port and
+                          :image/start-ms. Requests already run while it runs,
+                          the supervisor waits for it
+   :rep/after-evaluation  (fn [w evaluation]) after every evaluation of a
+                          POST, with or without the shared image. `evaluation`
+                          has :evaluation/session, :evaluation/id,
+                          :evaluation/state (:done or :failed),
+                          :evaluation/exit and :evaluation/code"
   [options]
   (let [env (fn [variable]
               (not-empty (System/getenv variable)))
@@ -247,6 +315,9 @@
             :rep/token-days 30
             :rep/public-url (env "REP_PUBLIC_URL")
             :rep/prelude (env "REP_PRELUDE")
+            :rep/shared-image? (contains? #{"1" "true"} (env "REP_SHARED_IMAGE"))
+            :rep/backoff-ms 100
+            :rep/backoff-max-ms 5000
             :rep/port (or (some-> (env "REP_PORT") parse-long) 8730)
             :rep/ip (or (env "REP_IP") "127.0.0.1")
             :rep/output-limit (* 10 1024 1024)
@@ -255,30 +326,40 @@
             :rep/grace-ms 1000
             :rep/lock (Object.)
             :rep/sessions (atom {})
+            :rep/image (atom {:image/generation 0 :image/seen {}})
             :rep/evaluations (atom {})}
            (dissoc options :rep/dir :rep/state-dir :rep/token :rep/secret))))
 
 (defn start!
   "Starts the HTTP server of a prepared system and adds `:rep/server`.
-   `:rep/port` becomes the port it listens on, which matters for port 0."
-  [{:rep/keys [port ip max-body] :as w}]
-  (let [server (http/run-server (fn [request] (handle w request))
+   `:rep/port` becomes the port it listens on, which matters for port 0.
+   The handler and the hooks get the system as this function answers it.
+   With `:rep/shared-image?` it also starts the image and waits until
+   that runs, see `rep.image/start!`."
+  [{:rep/keys [port ip max-body shared-image?] :as w}]
+  (let [system (promise)
+        server (http/run-server (fn [request] (handle @system request))
                                 {:port port
                                  :ip ip
                                  :thread 16
                                  :max-body max-body
-                                 :legacy-return-value? false})]
-    (assoc w
-           :rep/server server
-           :rep/port (http/server-port server))))
+                                 :legacy-return-value? false})
+        w (assoc w
+                 :rep/server server
+                 :rep/port (http/server-port server))]
+    (deliver system w)
+    (cond-> w
+      shared-image? (image/start!))))
 
 (defn stop!
-  "Stops the HTTP server and ends the processes of the sessions. What
-   still ran in them fails, and gets a moment to record that."
+  "Stops the HTTP server, when the system has one, and ends the processes
+   of the sessions and the shared image with its supervision. What still
+   ran in them fails, and gets a moment to record that."
   [{:rep/keys [server evaluations] :as w}]
   (when server
     (http/server-stop! server))
   (session/stop-all! w)
+  (image/stop! w)
   (loop [waited 0]
     (when (and (seq @evaluations) (< waited 3000))
       (Thread/sleep 20)
@@ -290,22 +371,32 @@
    :ip {:desc "Address to listen on (127.0.0.1)"}
    :dir {:desc "Work folder (work)"}
    :public-url {:desc "How the outside reaches the server"}
-   :prelude {:desc "A Clojure file every session loads when it starts"}})
+   :prelude {:desc "A Clojure file every session loads when it starts"}
+   :shared-image {:coerce :boolean
+                  :desc "All sessions evaluate in one process that starts with the server"}})
+
+(defn cli-options
+  "The options for `prepare` from the arguments of `bb serve`."
+  [args]
+  (let [{:keys [port ip dir public-url prelude shared-image]} (cli/parse-opts args {:spec cli-spec})]
+    (cond-> {}
+      port (assoc :rep/port port)
+      ip (assoc :rep/ip ip)
+      dir (assoc :rep/dir dir)
+      public-url (assoc :rep/public-url public-url)
+      prelude (assoc :rep/prelude prelude)
+      shared-image (assoc :rep/shared-image? true))))
 
 (defn -main
-  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE]"
+  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE] [--shared-image]"
   [& args]
-  (let [{:keys [port ip dir public-url prelude]} (cli/parse-opts args {:spec cli-spec})
-        w (-> (cond-> {}
-                port (assoc :rep/port port)
-                ip (assoc :rep/ip ip)
-                dir (assoc :rep/dir dir)
-                public-url (assoc :rep/public-url public-url)
-                prelude (assoc :rep/prelude prelude))
+  (let [w (-> (cli-options args)
               (prepare)
               (start!))]
     (println (str "rep listens on http://" (:rep/ip w) ":" (:rep/port w)))
     (println (str "Work folder: " (:rep/dir w)))
+    (when (:rep/shared-image? w)
+      (println "All sessions share one image."))
     (if (:rep/token w)
       (println "Callers send the static token of REP_TOKEN.")
       (let [code (auth/mint-code! w)]
@@ -319,4 +410,16 @@
   (stop! w)
   ;; curl -s -H 'Authorization: Bearer dev' --data-binary '(+ 1 2)' \
   ;;   http://127.0.0.1:8730/rep/$(uuidgen)/$(uuidgen)
-  )
+
+  (cli-options ["--port" "8730" "--shared-image"])
+
+  ;; a host with an HTTP server of its own mounts the handler
+  (def w (image/start! (prepare {:rep/token "dev" :rep/shared-image? true})))
+  (defn host-handler
+    [request]
+    (if (rep-path? (:uri request))
+      (handle w request)
+      {:status 200 :body "the host's own page"}))
+  (def server (http/run-server host-handler {:port 8731 :legacy-return-value? false}))
+  (http/server-stop! server)
+  (stop! w))

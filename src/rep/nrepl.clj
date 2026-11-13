@@ -63,9 +63,41 @@
     (.close socket)
     (catch java.io.IOException _ nil)))
 
+(defn wrapped
+  "`body` as one form for the server. `load-string` stops at the first
+   error, answers the value of the last form and counts lines as the
+   caller wrote them. Plain nREPL would go on after an error. The
+   namespace that `body` switches to does not stay either."
+  [body]
+  (str "(load-string " (pr-str body) ")"))
+
+(defonce ^{:private true
+           :doc "The socket option TCP_QUICKACK of Linux, nil where there is
+  none. Babashka has no name for it, so the delay picks it from the
+  options a socket supports."}
+  quick-ack
+  (delay
+    (with-open [socket (java.net.Socket.)]
+      (some #(when (= "TCP_QUICKACK" (str %)) %)
+            (.supportedOptions socket)))))
+
+(defn quick-ack!
+  "Makes the kernel acknowledge at once what arrives next on
+   `connection`. Linux else holds the acknowledgement of a message back
+   for 40 ms, and babashka's nREPL waits for it before it sends the next
+   one, the `done` after a value. The setting does not stick, so call
+   this before every `receive!` that should be fast. Does nothing where
+   the option is missing."
+  [{:nrepl/keys [socket]}]
+  (when-let [option @quick-ack]
+    (.setOption socket option true))
+  nil)
+
 (comment
   ;; bb nrepl-server 127.0.0.1:1667
   (def connection (connect 1667))
   (def session (clone! connection))
   (call! connection {"op" "eval" "session" session "code" "(println \"hi\") (+ 1 2)"})
+  (call! connection {"op" "eval" "session" session "code" (wrapped "(ns other) (/ 1 0) :never")})
+  (quick-ack! connection)
   (close! connection))
