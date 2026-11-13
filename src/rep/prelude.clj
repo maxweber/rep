@@ -8,7 +8,7 @@
             [rep.files :as files]))
 
 (defonce ^{:doc "What the server told this session: `:secret` signs the
-  file URLs, `:base-url` is where the caller reached the server,
+  file URLs and nothing else, `:base-url` is where the caller reached the server,
   `:url-seconds` how long a URL holds, `:parent` the server's process id."}
   config
   (atom {}))
@@ -82,7 +82,7 @@
 (defn- signed-url
   [method path seconds]
   (let [{:keys [secret base-url url-seconds]} @config]
-    (files/url {:rep/secret secret}
+    (files/url {:rep/file-secret secret}
                {:url/method method
                 :url/path path
                 :url/seconds (or seconds url-seconds)

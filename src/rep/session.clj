@@ -10,7 +10,8 @@
             [rep.nrepl :as nrepl]))
 
 (def hidden-variables
-  "What a session does not inherit from the server's environment."
+  "What a session does not inherit from the server's environment: the
+   static token and the key that signs tokens."
   #{"REP_TOKEN" "REP_SECRET"})
 
 (defn environment
@@ -50,10 +51,10 @@
 
 (defn- setup-code
   "What a fresh process evaluates before the first request."
-  [{:rep/keys [secret url-seconds prelude]}]
+  [{:rep/keys [file-secret url-seconds prelude]}]
   (str "(require 'rep.prelude)"
        (pr-str (list 'rep.prelude/configure!
-                     {:secret secret
+                     {:secret file-secret
                       :url-seconds url-seconds
                       :parent (.pid (java.lang.ProcessHandle/current))}))
        "(require '[rep.prelude :refer [sh upload-url download-url help]])"
@@ -186,7 +187,7 @@
   nil)
 
 (comment
-  (def w {:rep/dir "work" :rep/secret "secret" :rep/url-seconds 900 :rep/sessions (atom {})})
+  (def w {:rep/dir "work" :rep/file-secret "secret" :rep/url-seconds 900 :rep/sessions (atom {})})
   (def session (process! w "s1"))
   (:session/port session)
   (:session/start-ms session)

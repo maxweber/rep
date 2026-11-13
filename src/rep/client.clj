@@ -9,10 +9,15 @@
 
    It makes the evaluation id itself and sends the same id when it has to
    ask again, after a broken connection or for the rest of a long answer.
-   The server runs the code once."
+   The server runs the code once.
+
+   `rep login <code>` exchanges a login code for a token and keeps the
+   token in the user's config folder, so that it is neither printed nor
+   left in the current folder."
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
             [babashka.http-client :as http]
+            [cheshire.core :as json]
             [clojure.string :as str]))
 
 (def session-file
@@ -36,11 +41,78 @@
         (spit session-file (str fresh "\n"))
         fresh)))
 
+(defn token-file
+  "Where the token for the server at `url` is kept: a file named after the
+   server's host and port in `$XDG_CONFIG_HOME/rep`, by default
+   `~/.config/rep`."
+  [url]
+  (let [uri (java.net.URI. url)
+        port (cond
+               (pos? (.getPort uri)) (.getPort uri)
+               (= "https" (.getScheme uri)) 443
+               :else 80)
+        config (or (not-empty (System/getenv "XDG_CONFIG_HOME"))
+                   (fs/path (fs/home) ".config"))]
+    (fs/path config "rep" (str (.getHost uri) "-" port ".token"))))
+
+(defn- stored-token
+  [url]
+  (let [file (token-file url)]
+    (when (fs/exists? file)
+      (not-empty (str/trim (slurp (fs/file file)))))))
+
 (defn- settings
-  [{:keys [url token session-id]}]
-  {:client/url (str/replace (or url (System/getenv "REP_URL") "http://127.0.0.1:8730") #"/+$" "")
-   :client/token (or token (System/getenv "REP_TOKEN"))
-   :client/session (session session-id)})
+  "The server's address and the token for it: the option, `REP_TOKEN`, or
+   the one `rep login` stored."
+  [{:keys [url token]}]
+  (let [url (str/replace (or url (System/getenv "REP_URL") "http://127.0.0.1:8730") #"/+$" "")]
+    {:client/url url
+     :client/token (or token
+                       (not-empty (System/getenv "REP_TOKEN"))
+                       (stored-token url))}))
+
+(defn- expiry
+  "The day a token expires, read from its payload."
+  [token]
+  (try
+    (let [payload (second (str/split token #"\."))
+          claims (json/parse-string (String. (.decode (java.util.Base64/getUrlDecoder) payload) "UTF-8"))]
+      (subs (str (java.time.Instant/ofEpochSecond (get claims "exp"))) 0 10))
+    (catch Exception _ nil)))
+
+(defn login
+  "Exchanges the login code for a token and stores it, readable by the
+   user only. Says that it worked and until when, never the token.
+   Answers the exit code."
+  [{:client/keys [url]} code]
+  (let [{:keys [status body]} (http/post (str url "/login") {:body (str code) :throw false})]
+    (if (= 200 status)
+      (let [file (token-file url)]
+        (fs/create-dirs (fs/parent file))
+        (spit (fs/file file) "")
+        (fs/set-posix-file-permissions file "rw-------")
+        (spit (fs/file file) body)
+        (println (str "Logged in to " url
+                      (when-let [day (expiry body)]
+                        (str " until " day))
+                      "."))
+        0)
+      (do
+        (note (str/trim (str body)))
+        2))))
+
+(defn logout
+  "Ends the stored token at the server and deletes its file."
+  [{:client/keys [url]}]
+  (let [token (stored-token url)]
+    (when token
+      (try
+        (http/post (str url "/logout") {:headers {"Authorization" (str "Bearer " token)}
+                                        :throw false})
+        (catch java.io.IOException _ nil)))
+    (fs/delete-if-exists (token-file url))
+    (println (if token "Logged out." "Not logged in."))
+    0))
 
 (defn- post
   "POSTs `code` as the evaluation `id` and reads the answer as a stream,
@@ -145,13 +217,15 @@
   {:id {:desc "Evaluation id, a fresh UUID by default"}
    :session-id {:desc "Session id (REP_SESSION, else the file .rep-session)"}
    :url {:desc "Server address (REP_URL, else http://127.0.0.1:8730)"}
-   :token {:desc "Bearer token (REP_TOKEN)"}
+   :token {:desc "Bearer token (REP_TOKEN, else the one rep login stored)"}
    :wait {:coerce :long :desc "Stop following after this many seconds, exit 124"}})
 
 (def help
   (str/join
    "\n"
    ["rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer"
+    "rep login CODE                          exchanges a login code for a token and stores it"
+    "rep logout                              ends the stored token"
     "rep session                             prints the session id"
     ""
     (cli/format-opts {:spec cli-spec})]))
@@ -159,18 +233,21 @@
 (defn -main
   [& args]
   (let [{:keys [opts args]} (cli/parse-args args {:spec cli-spec})
-        [command] args]
+        [command argument] args]
     (if (:help opts)
       (println help)
       (let [w (settings opts)]
-        (when-not (:client/token w)
-          (note "rep: no token. Set REP_TOKEN or pass --token.")
-          (System/exit 2))
         (case command
-          "session" (println (:client/session w))
-          nil (let [id (or (:id opts) (str (random-uuid)))
-                    code (slurp *in*)]
-                (finish (within (:wait opts) id #(follow w id code))))
+          "login" (System/exit (login w argument))
+          "logout" (System/exit (logout w))
+          "session" (println (session (:session-id opts)))
+          nil (let [w (assoc w :client/session (session (:session-id opts)))
+                    id (or (:id opts) (str (random-uuid)))]
+                (when-not (:client/token w)
+                  (note "rep: no token. Log in with rep login <code>, or set REP_TOKEN.")
+                  (System/exit 2))
+                (let [code (slurp *in*)]
+                  (finish (within (:wait opts) id #(follow w id code)))))
           (do
             (note help)
             (System/exit 2)))))))

@@ -3,6 +3,15 @@
  {serve {:doc "Starts the server: bb serve --port 8730 --dir work"
          :requires ([rep.server])
          :task (apply rep.server/-main *command-line-args*)}
+  code {:doc "Makes a login code: bb code [--dir work]"
+        :requires ([rep.admin])
+        :task (apply rep.admin/code *command-line-args*)}
+  tokens {:doc "Lists the tokens that are still good: bb tokens [--dir work]"
+          :requires ([rep.admin])
+          :task (apply rep.admin/tokens *command-line-args*)}
+  revoke {:doc "Ends a token: bb revoke <jti> [--dir work]"
+          :requires ([rep.admin])
+          :task (apply rep.admin/revoke *command-line-args*)}
   test {:doc "Runs the tests"
         :extra-paths ["test"]
         :requires ([clojure.test :as test])

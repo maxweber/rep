@@ -5,6 +5,8 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http-server]
+            [rep.admin :as admin]
+            [rep.auth :as auth]
             [rep.server :as server]
             [rep.session :as session]))
 
@@ -368,3 +370,107 @@
               (is (str/starts-with? (:body response) "The session's prelude failed:"))))))
       (finally
         (fs/delete prelude)))))
+
+(defn login
+  "POSTs a login code. The answer's body is the token when it worked."
+  [w code]
+  (http/post (address w "/login") {:body code :throw false}))
+
+(defn with-bearer
+  "POSTs `code` with `bearer` as the token."
+  [w bearer code]
+  (http/post (address w "/rep/" (uuid) "/" (uuid))
+             {:headers {"Authorization" (str "Bearer " bearer)}
+              :body code
+              :throw false}))
+
+(deftest login-test
+  (with-system {:rep/token nil}
+    (fn [w]
+      (let [code (auth/mint-code! w)]
+        (is (re-matches #"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}" code))
+        (testing "a GET does not burn the code, a link preview may do one"
+          (is (= 405 (:status (http/get (address w "/login") {:throw false})))))
+        (let [answer (login w code)
+              token (:body answer)]
+          (testing "the code is exchanged for a token"
+            (is (= 200 (:status answer)))
+            (is (= 3 (count (str/split token #"\."))))
+            (is (= "3\n" (:body (with-bearer w token "(+ 1 2)")))))
+          (testing "once"
+            (let [again (login w code)]
+              (is (= 401 (:status again)))
+              (is (str/includes? (:body again) "unknown, used or expired"))))
+          (testing "a token that was changed is refused"
+            (let [[header payload signature] (str/split token #"\.")
+                  forged (-> (String. (.decode (java.util.Base64/getUrlDecoder) payload) "UTF-8")
+                             (str/replace "\"iss\":\"rep\"" "\"iss\":\"rep\",\"x\":1")
+                             (.getBytes "UTF-8"))
+                  forged (.encodeToString (.withoutPadding (java.util.Base64/getUrlEncoder)) forged)]
+              (is (= 401 (:status (with-bearer w (str header "." forged "." signature) "1"))))
+              (is (= 401 (:status (with-bearer w (str header "." payload "." (str/reverse signature)) "1"))))
+              (is (= 401 (:status (with-bearer w "not-a-token" "1"))))))
+          (testing "the tokens are on record, and one without its record is refused"
+            (let [[record] (auth/tokens w)]
+              (is (= 1 (count (auth/tokens w))))
+              (is (true? (auth/revoke! w (:jti record))))
+              (is (= 401 (:status (with-bearer w token "1"))))
+              (is (empty? (auth/tokens w)))))))
+      (testing "a code as a person types it: lower case, no dashes"
+        (let [code (auth/mint-code! w)]
+          (is (= 200 (:status (login w (str/lower-case (str/replace code "-" ""))))))))
+      (testing "an unknown code and an empty one"
+        (is (= 401 (:status (login w "AAAA-BBBB-CCCC"))))
+        (is (= 401 (:status (login w ""))))))))
+
+(deftest logout-test
+  (with-system {:rep/token nil}
+    (fn [w]
+      (let [token (:body (login w (auth/mint-code! w)))
+            logout (fn [bearer]
+                     (http/post (address w "/logout")
+                                {:headers {"Authorization" (str "Bearer " bearer)}
+                                 :throw false}))]
+        (is (= 200 (:status (with-bearer w token "1"))))
+        (is (= 200 (:status (logout token))))
+        (is (= 401 (:status (with-bearer w token "1"))))
+        (is (= 401 (:status (logout token))))))))
+
+(deftest expiry-test
+  (testing "a code that is too old"
+    (with-system {:rep/token nil :rep/code-minutes -1}
+      (fn [w]
+        (is (= 401 (:status (login w (auth/mint-code! w))))))))
+  (testing "a token that is too old"
+    (with-system {:rep/token nil :rep/token-days -1}
+      (fn [w]
+        (let [answer (login w (auth/mint-code! w))]
+          (is (= 200 (:status answer)))
+          (is (= 401 (:status (with-bearer w (:body answer) "1")))))))))
+
+(deftest static-token-test
+  (with-system {}
+    (fn [w]
+      (testing "a configured token still works as a bearer"
+        (is (= "3\n" (:body (with-bearer w token "(+ 1 2)")))))
+      (testing "and a login code works next to it, made from a terminal while the server runs"
+        (let [code (str/trim (with-out-str
+                               (binding [*err* (java.io.StringWriter.)]
+                                 (admin/code "--dir" (:rep/dir w)))))
+              answer (login w code)]
+          (is (= 200 (:status answer)))
+          (is (= "3\n" (:body (with-bearer w (:body answer) "(+ 1 2)")))))))))
+
+(deftest session-keys-test
+  (with-system {}
+    (fn [w]
+      (testing "a session gets the key for file URLs, not the one that signs tokens, and no token"
+        (is (not= (:rep/secret w) (:rep/file-secret w)))
+        (is (= (pr-str [nil nil (:rep/file-secret w)])
+               (str/trim (:body (evaluate w (uuid) "[(System/getenv \"REP_TOKEN\") (System/getenv \"REP_SECRET\") (:secret @rep.prelude/config)]")))))
+        (is (not (str/includes? (:body (evaluate w (uuid) "(pr-str @rep.prelude/config)"))
+                                (:rep/secret w)))))
+      (testing "a token signed with what the session holds is refused"
+        (let [claims {"iss" "rep" "iat" (auth/now) "exp" (+ (auth/now) 3600) "jti" (uuid)}
+              forged (auth/sign {:rep/secret (:rep/file-secret w)} claims)]
+          (is (= 401 (:status (with-bearer w forged "1")))))))))

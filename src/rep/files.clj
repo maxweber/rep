@@ -53,9 +53,10 @@
                      (.doFinal mac (.getBytes (str text) "UTF-8")))))
 
 (defn signature
-  "What signs `method` on `path` until the second `expires`."
-  [{:rep/keys [secret]} method path expires]
-  (hmac secret (str method "\n" path "\n" expires)))
+  "What signs `method` on `path` until the second `expires`, under the
+   key `:rep/file-secret`."
+  [{:rep/keys [file-secret]} method path expires]
+  (hmac file-secret (str method "\n" path "\n" expires)))
 
 (defn- encode
   "`path` for a URL, segment by segment."
@@ -158,7 +159,7 @@
              :body target})))
 
 (comment
-  (def w {:rep/dir "work" :rep/secret "secret"})
+  (def w {:rep/dir "work" :rep/file-secret "secret"})
   (relative "a/../b.txt")
   (relative "../b.txt")
   (url w {:url/method "PUT" :url/path "in/clip one.mp4" :url/seconds 900

@@ -14,16 +14,18 @@ This is an experiment and it runs on babashka only.
 
 ## Try it
 
-Start a server. It prints a token.
+Start a server. It prints a login code that works once.
 
 ```
 bb serve --port 8730 --dir work
 ```
 
-Talk to it with the client, which reads the code from standard input.
+Log in with the client, then talk to the server. The client reads the code to
+evaluate from standard input.
 
 ```
-export REP_URL=http://127.0.0.1:8730 REP_TOKEN=<the token>
+export REP_URL=http://127.0.0.1:8730
+bin/rep login 7K3M-9QWX-2B4T
 
 bin/rep <<'EOF'
 (def files (clojure.string/split-lines (slurp "list.txt")))
@@ -34,9 +36,10 @@ EOF
 Or with curl.
 
 ```
+curl -s -X POST --data-binary "7K3M-9QWX-2B4T" "$REP_URL/login" -o ~/.rep-token
 SESSION=$(uuidgen)
 
-curl -s -H "Authorization: Bearer $REP_TOKEN" \
+curl -s -H "Authorization: Bearer $(cat ~/.rep-token)" \
   --data-binary '(+ 1 2)' \
   "$REP_URL/rep/$SESSION/$(uuidgen)"
 ```
@@ -77,8 +80,46 @@ streams its output until it ends. The same POST again, with
 Other answers: 401 without the token, 400 for ids that are no UUIDs, 409 for an
 id that was used with other code, 405 for anything but a POST.
 
-Two more routes move files, see below. `GET /` answers a short text that
-explains all of this to an agent.
+Two more routes move files and two log a caller in and out, see below.
+`GET /` answers a short text that explains all of this to an agent.
+
+## Logging in
+
+A secret that passes through a chat should be worth little. So the server
+hands out a login code that works once and for ten minutes. The caller
+exchanges it for a token and keeps the token itself.
+
+```
+POST /login     body = the code, answer = the token and nothing else
+POST /logout    ends the token it is sent with
+```
+
+`rep login <code>` does the exchange and stores the token in
+`~/.config/rep/<host>-<port>.token`, readable by the user only. It never
+prints the token and leaves nothing in the current folder. `rep logout` ends
+the token and deletes the file. With curl, write the answer of `/login`
+straight into a file, as in the example above, so that the token never shows
+up in a transcript.
+
+Only a POST looks at a code. A chat app that fetches a pasted link for a
+preview burns nothing.
+
+On the server's side:
+
+```
+bb code [--dir work]           makes another login code
+bb tokens [--dir work]         lists the tokens that are still good
+bb revoke <jti> [--dir work]   ends one
+```
+
+The token is a JWT, signed with HMAC-SHA256, good for 30 days. The server
+keeps a small file per token and refuses a token without its file, which is
+how `bb revoke` and `/logout` work. The signing key is the file `secret` in
+the state folder, or `REP_SECRET`.
+
+For tests and automation, set `REP_TOKEN` on the server. That static token is
+then accepted as a bearer too, and the client sends it when it finds it in its
+own environment.
 
 ## Sessions
 
@@ -198,10 +239,13 @@ EOF
 
 ```
 rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer
+rep login CODE                          exchanges a login code for a token and stores it
+rep logout                              ends the stored token
 rep session                             prints the session id
 ```
 
-It reads `REP_URL` and `REP_TOKEN`. The session id comes from `REP_SESSION` or
+It reads `REP_URL`. The token is `--token`, else `REP_TOKEN`, else the one
+`rep login` stored for that server. The session id comes from `REP_SESSION` or
 from the file `.rep-session` in the current folder, which the client makes on
 first use. One folder, one session.
 
@@ -236,8 +280,14 @@ shell login. A session is full babashka with the rights of the server's user.
 Run rep on a machine you can throw away. It listens on 127.0.0.1 unless you
 tell it otherwise.
 
-- A session does not get the server's token. It does hold the key that signs
-  file URLs, so its code can make such a URL for any file in the work folder.
+- An agent can read the token file that `rep login` stored. That is why a
+  token only works for this one server, expires and can be revoked.
+- The server hands a session neither a token nor the key that signs tokens.
+  A session gets a key derived from it that signs file URLs and nothing else.
+  But a session runs as the same user as the server, so its code can read the
+  file `secret` in the state folder, or the server's environment. Keeping a
+  session from that takes a second user or a sandbox, which rep does not set
+  up.
 - Sessions are never ended for being idle. Each one holds its 95 MB until the
   server stops.
 - Code that loops without calling anything, such as `(loop [] (recur))`,

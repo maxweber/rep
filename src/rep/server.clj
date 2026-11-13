@@ -10,11 +10,15 @@
    and the value of its last form, with the output of bash as bash wrote
    it. The outcome travels in the headers Rep-Status and Rep-Exit, so the
    text needs no frame around it. The same POST again runs nothing, it
-   answers the same text, from byte `?from=` on when asked."
+   answers the same text, from byte `?from=` on when asked.
+
+     POST /login    body = a login code, answer = a token (see `rep.auth`)
+     POST /logout   ends the token it is sent with"
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
             [clojure.string :as str]
             [org.httpkit.server :as http]
+            [rep.auth :as auth]
             [rep.evaluation :as evaluation]
             [rep.files :as files]
             [rep.output :as output]
@@ -32,6 +36,11 @@
     "POST /rep/<session-uuid>/<evaluation-uuid>   body = Clojure code, answer = plain text"
     ""
     "Send the header Authorization: Bearer <token>."
+    "If you were given a login code, exchange it once for a token. Keep the token in a file and do not print it:"
+    "  curl -s -X POST --data-binary \"$CODE\" \"$REP_URL/login\" -o ~/.rep-token"
+    "  then send -H \"Authorization: Bearer $(cat ~/.rep-token)\""
+    "POST /logout with that header ends the token."
+    ""
     "Pick one session uuid and keep it. A session is a babashka process, definitions stay in it."
     "Use a new evaluation uuid for every new piece of code."
     "The same uuid with the same code answers the same text again and runs nothing. Add ?from=<bytes> for the rest only."
@@ -48,15 +57,57 @@
     :headers (merge text-headers headers)
     :body body}))
 
+(defn- bearer
+  "The token the request carries, or nil."
+  [request]
+  (some-> (get-in request [:headers "authorization"])
+          (str/replace-first #"(?i)^bearer\s+" "")
+          (str/trim)
+          (not-empty)))
+
 (defn- authorized?
-  "True when the request carries the server's token as a bearer."
-  [{:rep/keys [token]} request]
-  (let [given (some-> (get-in request [:headers "authorization"])
-                      (str/replace-first #"(?i)^bearer\s+" ""))]
+  "True for the static token, when one is configured, and for a token the
+   server gave out that is still good."
+  [{:rep/keys [token] :as w} request]
+  (let [given (bearer request)]
     (boolean
      (and given
-          (java.security.MessageDigest/isEqual (.getBytes given "UTF-8")
-                                               (.getBytes (str token) "UTF-8"))))))
+          (or (and token
+                   (java.security.MessageDigest/isEqual (.getBytes given "UTF-8")
+                                                        (.getBytes (str token) "UTF-8")))
+              (auth/claims w given))))))
+
+(defn- login
+  "Answers /login. The body is a login code, the answer its token and
+   nothing else, so that a caller can write it straight into a file. Only
+   a POST looks at the code. A link preview that GETs the address burns
+   nothing."
+  [w {:keys [request-method body]}]
+  (if (not= :post request-method)
+    (text 405 "POST the login code as the body.\n")
+    (if-let [token (some->> body
+                            (.readAllBytes)
+                            (String.)
+                            (not-empty)
+                            (auth/exchange! w))]
+      (text 200 token)
+      (text 401 "This code is unknown, used or expired. Ask for a new one.\n"))))
+
+(defn- logout
+  "Answers /logout: ends the token the request was sent with."
+  [w {:keys [request-method] :as request}]
+  (let [claims (some->> (bearer request) (auth/claims w))]
+    (cond
+      (not= :post request-method)
+      (text 405 "POST with the token as the bearer.\n")
+
+      claims
+      (do
+        (auth/revoke! w (get claims "jti"))
+        (text 200 "Logged out.\n"))
+
+      :else
+      (text 401 "Send the token you want to end as Authorization: Bearer <token>.\n"))))
 
 (defn- base-url
   "Where the caller reached the server, for the URLs handed out to it."
@@ -138,11 +189,17 @@
         :get (files/fetch w request)
         (text 405 "PUT or GET.\n"))
 
+      (= "/login" uri)
+      (login w request)
+
+      (= "/logout" uri)
+      (logout w request)
+
       (not (and (= "rep" root) session id (not more)))
       (text 404 "Not found. GET / tells how this works.\n")
 
       (not (authorized? w request))
-      (text 401 "Send the header Authorization: Bearer <token>.\n")
+      (text 401 "Send the header Authorization: Bearer <token>. GET / tells how to get one.\n")
 
       (not (and (parse-uuid session) (parse-uuid id)))
       (text 400 "The session and the evaluation id have to be UUIDs.\n")
@@ -153,19 +210,18 @@
       :else
       (evaluate w request session id))))
 
-(defn- random-hex
-  [length]
-  (let [data (byte-array length)]
-    (.nextBytes (java.security.SecureRandom.) data)
-    (apply str (map #(format "%02x" %) data))))
-
 (defn prepare
   "The system map from the options, the environment and the defaults.
 
    :rep/dir           the work folder, where the sessions run and files live
    :rep/state-dir     where the evaluations are kept, `.rep` in the work folder
-   :rep/token         the bearer token. A random one is made when none is set
-   :rep/secret        signs the file URLs, derived from the token when not set
+   :rep/token         a static bearer token, for tests and automation. Without
+                      one, callers log in with a code (see `rep.auth`)
+   :rep/secret        the key that signs the tokens, from `REP_SECRET` or kept
+                      in the state folder. `:rep/file-secret`, which signs the
+                      file URLs and is all a session gets, is derived from it
+   :rep/code-minutes  how long a login code holds, 10
+   :rep/token-days    how long a token holds, 30
    :rep/public-url    how the outside reaches the server, else from the request
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
@@ -179,14 +235,16 @@
   (let [env (fn [variable]
               (not-empty (System/getenv variable)))
         dir (str (fs/absolutize (or (:rep/dir options) (env "REP_DIR") "work")))
-        given (or (:rep/token options) (env "REP_TOKEN"))
-        token (or given (random-hex 16))]
-    (fs/create-dirs dir)
+        state-dir (str (or (:rep/state-dir options) (fs/path dir ".rep")))
+        _ (fs/create-dirs dir)
+        secret (or (:rep/secret options) (env "REP_SECRET") (auth/secret! state-dir))]
     (merge {:rep/dir dir
-            :rep/state-dir (str (fs/path dir ".rep"))
-            :rep/token token
-            :rep/token-made? (not given)
-            :rep/secret (or (env "REP_SECRET") (files/hmac token "rep file urls"))
+            :rep/state-dir state-dir
+            :rep/token (or (:rep/token options) (env "REP_TOKEN"))
+            :rep/secret secret
+            :rep/file-secret (auth/file-secret secret)
+            :rep/code-minutes 10
+            :rep/token-days 30
             :rep/public-url (env "REP_PUBLIC_URL")
             :rep/prelude (env "REP_PRELUDE")
             :rep/port (or (some-> (env "REP_PORT") parse-long) 8730)
@@ -198,7 +256,7 @@
             :rep/lock (Object.)
             :rep/sessions (atom {})
             :rep/evaluations (atom {})}
-           (dissoc options :rep/dir :rep/token))))
+           (dissoc options :rep/dir :rep/state-dir :rep/token :rep/secret))))
 
 (defn start!
   "Starts the HTTP server of a prepared system and adds `:rep/server`.
@@ -248,8 +306,12 @@
               (start!))]
     (println (str "rep listens on http://" (:rep/ip w) ":" (:rep/port w)))
     (println (str "Work folder: " (:rep/dir w)))
-    (when (:rep/token-made? w)
-      (println (str "Token: " (:rep/token w))))
+    (if (:rep/token w)
+      (println "Callers send the static token of REP_TOKEN.")
+      (let [code (auth/mint-code! w)]
+        (println (str "Login code, good once and for " (:rep/code-minutes w) " minutes: " code))
+        (println (str "  rep login " code))
+        (println "bb code makes another one.")))
     @(promise)))
 
 (comment
