@@ -341,6 +341,18 @@ traffic than http-kit. Without it nothing of `rep.door` is in the path of a
 request. So turn it on when you need the one thing it does, and read its
 limits under "Limits" first.
 
+A review on 2026-11-13 found three problems in the door that are not fixed.
+Do not put it on a port the internet reaches before the first two are:
+
+- When the process runs out of file descriptors, the door stops accepting
+  connections, and only a restart brings it back. Its cap of 1,024
+  connections lies above the usual limit of 1,024 open files, and a
+  connection can cost two.
+- A connection has no time limit. Connections that say nothing can take
+  every slot and keep everybody else out for as long as they stay.
+- A protocol upgrade, a WebSocket for example, cannot pass. Neither rep nor
+  nchat uses one.
+
 ## The client
 
 ```

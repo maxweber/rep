@@ -52,7 +52,12 @@
    `max-connections` bounds them. http-kit sees every connection come
    from 127.0.0.1, so a handler that wants the client's address reads
    it from the request the door hands it, or from a header a proxy
-   set."
+   set.
+
+   Known and not fixed (review of 2026-11-13, see the README): the
+   accept loop ends for good when the process runs out of file
+   descriptors, a connection has no time limit, and a protocol upgrade
+   cannot pass. Fix the first two before the door faces the internet."
   (:require [clojure.string :as str]))
 
 (def slice-bytes
