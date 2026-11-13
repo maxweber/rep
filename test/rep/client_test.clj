@@ -40,15 +40,16 @@
 (deftest bash-test
   (server-test/with-system {}
     (fn [w]
-      (testing "a script goes in and its output comes out without any quoting"
+      (testing "the output of bash comes out as bash wrote it, with its exit code"
         (is (= {:exit 3 :out "it's \"3\"\n" :err ""}
-               (rep w "echo \"it's \\\"$((1+2))\\\"\"\nexit 3\n" "--sh")))))))
+               (rep w (server-test/bash "echo \"it's \\\"$((1+2))\\\"\"\nexit 3\n"))))))))
 
 (deftest wait-attach-stop-test
   (server-test/with-system {}
     (fn [w]
       (let [id (server-test/uuid)
-            waited (rep w "echo one; sleep 4; echo two" "--sh" "--id" id "--wait" "1")]
+            code (server-test/bash "echo one; sleep 4; echo two")
+            waited (rep w code "--id" id "--wait" "1")]
         (testing "the client lets go after the wait, the evaluation goes on"
           (is (= 124 (:exit waited)))
           (is (= "one\n" (:out waited)))
@@ -56,12 +57,12 @@
         (testing "attach prints it from the start and follows to the end"
           (is (= {:exit 0 :out "one\ntwo\n" :err ""} (rep w "" "attach" id))))
         (testing "the same id again answers the same text and says so"
-          (let [again (rep w "echo one; sleep 4; echo two" "--sh" "--id" id)]
+          (let [again (rep w code "--id" id)]
             (is (= "one\ntwo\n" (:out again)))
             (is (str/includes? (:err again) "nothing ran again")))))
       (testing "stop"
         (let [id (server-test/uuid)
-              running (future (rep w "echo begun; sleep 30" "--sh" "--id" id))]
+              running (future (rep w (server-test/bash "echo begun; sleep 30") "--id" id))]
           (Thread/sleep 500)
           (is (= 0 (:exit (rep w "" "stop" id))))
           (let [{:keys [exit out]} (deref running 5000 nil)]

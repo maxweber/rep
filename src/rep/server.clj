@@ -7,11 +7,10 @@
      PUT    /file/<path>?...      a signed upload into the work folder
      GET    /file/<path>?...      a signed download out of it
 
-   The body of a POST is Clojure code for the session's SCI context. With
-   the content type text/x-shellscript it is a bash script. The answer is
-   plain text. The printed output and the value, or the output of bash
-   as bash wrote it. The outcome travels in the headers Rep-Status and
-   Rep-Exit, so the text needs no frame around it."
+   The body of a POST is Clojure code for the session's SCI context. The
+   answer is plain text: what the code printed and its value, with the
+   output of bash as bash wrote it. The outcome travels in the headers
+   Rep-Status and Rep-Exit, so the text needs no frame around it."
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
             [clojure.string :as str]
@@ -22,10 +21,6 @@
 
 (def text-headers
   {"Content-Type" "text/plain; charset=utf-8"})
-
-(def shell-types
-  "The content types that make a request body a bash script."
-  #{"text/x-shellscript" "text/x-sh" "application/x-sh"})
 
 (def usage
   "What a GET on / answers, for an agent that only knows the address."
@@ -40,7 +35,6 @@
     "Send the header Authorization: Bearer <token>."
     "Pick one session uuid and keep it, definitions stay in it."
     "Use a new evaluation uuid for every new piece of code. The same uuid answers the same text again and runs nothing."
-    "Content-Type: text/x-shellscript makes the body a bash script."
     "The headers Rep-Status (running, done, failed, stopped, interrupted) and Rep-Exit tell the outcome."
     "Start with the code (help)."
     ""]))
@@ -70,17 +64,6 @@
       (str (or (get headers "x-forwarded-proto") (name (or scheme :http)))
            "://"
            (get headers "host"))))
-
-(defn- kind
-  [request]
-  (let [content-type (some-> (get-in request [:headers "content-type"])
-                             (str/split #";")
-                             (first)
-                             (str/trim)
-                             (str/lower-case))]
-    (if (contains? shell-types content-type)
-      :shell
-      :clojure)))
 
 (defn- from
   "The byte the caller wants the output from."
@@ -123,7 +106,6 @@
       (text 400 "The body is empty. Send the code to evaluate.\n")
       (let [submitted (evaluation/submit! w {:request/session session
                                              :request/id id
-                                             :request/kind (kind request)
                                              :request/body body
                                              :request/base-url (base-url w request)})]
         (case (:submit/answer submitted)

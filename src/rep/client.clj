@@ -7,10 +7,6 @@
      (+ 1 2)
      EOF
 
-     rep --sh <<'EOF'
-     ffmpeg -version | head -1
-     EOF
-
    It makes the evaluation id itself and uses the same id when it has to
    ask again after a broken connection, so a retry never runs the code a
    second time."
@@ -52,14 +48,12 @@
 
 (defn- request
   "One HTTP request whose answer is read as a stream."
-  [{:client/keys [token] :as w} id {:keys [method body shell? from]}]
+  [{:client/keys [token] :as w} id {:keys [method body from]}]
   (http/request
    (cond-> {:method method
             :uri (str (address w id) (when from (str "?from=" from)))
             :headers (cond-> {"Authorization" (str "Bearer " token)}
-                       body (assoc "Content-Type" (if shell?
-                                                    "text/x-shellscript"
-                                                    "application/clojure")))
+                       body (assoc "Content-Type" "application/clojure"))
             :as :stream
             :throw false}
      body (assoc :body body))))
@@ -153,8 +147,7 @@
         result))))
 
 (def cli-spec
-  {:sh {:coerce :boolean :desc "The input is a bash script"}
-   :id {:desc "Evaluation id, a fresh UUID by default"}
+  {:id {:desc "Evaluation id, a fresh UUID by default"}
    :session-id {:desc "Session id (REP_SESSION, else the file .rep-session)"}
    :url {:desc "Server address (REP_URL, else http://127.0.0.1:8730)"}
    :token {:desc "Bearer token (REP_TOKEN)"}
@@ -163,10 +156,10 @@
 (def help
   (str/join
    "\n"
-   ["rep [--sh] [--wait SECONDS] < code   evaluates standard input, prints the answer"
-    "rep attach ID                        follows an evaluation or prints it again"
-    "rep stop ID                          stops an evaluation"
-    "rep session                          prints the session id"
+   ["rep [--wait SECONDS] < code   evaluates standard input, prints the answer"
+    "rep attach ID                 follows an evaluation or prints it again"
+    "rep stop ID                   stops an evaluation"
+    "rep session                   prints the session id"
     ""
     (cli/format-opts {:spec cli-spec})]))
 
@@ -187,7 +180,7 @@
           nil (let [id (or (:id opts) (str (random-uuid)))
                     code (slurp *in*)]
                 (finish (within (:wait opts) id
-                                #(follow w id {:method :post :body code :shell? (:sh opts)}))))
+                                #(follow w id {:method :post :body code}))))
           (do
             (note help)
             (System/exit 2)))))))

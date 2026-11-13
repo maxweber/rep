@@ -78,7 +78,7 @@ final headers.
 Other answers: 401 without the token, 400 for ids that are no UUIDs, 404 for an
 id nobody used, 409 for a busy session or a reused id.
 
-## Bash without quoting
+## Bash
 
 A model learned bash from raw bash output. So the output of a script goes into
 the answer byte for byte, standard error included, with no JSON and no Clojure
@@ -90,21 +90,26 @@ bin/rep <<'EOF'
 EOF
 ```
 
-That still leaves quoting on the way in, bash inside a Clojure string. For a
-plain script, skip Clojure and send the script as the body:
+`(sh script)` answers `{:exit <code>}`, so code can branch on it. When it is
+the last form, its exit code becomes `Rep-Exit` and the exit code of the
+client. Every call is a new bash process in the work folder. A `cd` or a
+variable does not carry over to the next one.
+
+On the way in, the script is a Clojure string, so the caller escapes `"` and
+`\`. There is one kind of body on purpose. A script that is awkward to quote
+goes up as a file and runs from there:
 
 ```
-bin/rep --sh <<'EOF'
-printf '%s\n' "it's a \"test\"" > note.txt
-grep -n "test" note.txt
+URL=$(bin/rep <<'EOF'
+(print (upload-url "scripts/cut.sh"))
+EOF
+)
+curl -s -X PUT --data-binary @cut.sh "$URL"
+
+bin/rep <<'EOF'
+(sh "bash scripts/cut.sh")
 EOF
 ```
-
-`--sh` sets `Content-Type: text/x-shellscript`. The exit code of bash becomes
-`Rep-Exit` and the exit code of the client. Every script is a new bash process
-in the work folder. A `cd` or a variable does not carry over to the next one.
-
-In Clojure, `(sh script)` answers `{:exit <code>}`, so code can branch on it.
 
 ## Sessions
 
@@ -144,8 +149,8 @@ An evaluation does not depend on the connection that started it. When the
 caller hangs up, it runs on.
 
 ```
-bin/rep --sh --wait 100 <<'EOF'
-./render.sh
+bin/rep --wait 100 <<'EOF'
+(sh "./render.sh")
 EOF
 ```
 
@@ -171,10 +176,10 @@ EOF
 ## The client
 
 ```
-rep [--sh] [--wait SECONDS] < code   evaluates standard input, prints the answer
-rep attach ID                        follows an evaluation or prints it again
-rep stop ID                          stops an evaluation
-rep session                          prints the session id
+rep [--wait SECONDS] < code   evaluates standard input, prints the answer
+rep attach ID                 follows an evaluation or prints it again
+rep stop ID                   stops an evaluation
+rep session                   prints the session id
 ```
 
 It reads `REP_URL` and `REP_TOKEN`. The session id comes from `REP_SESSION` or
@@ -220,8 +225,8 @@ It listens on 127.0.0.1 unless you tell it otherwise.
 
 - Does an agent get by with this one tool, or does it miss the file tools it
   was trained on?
-- How often does bash inside a Clojure string go wrong, compared with a script
-  sent as the body?
+- How often does bash inside a Clojure string go wrong? And does the agent
+  find the way around it, a script uploaded as a file, on its own?
 - Does the agent use the session's definitions, or does it put everything into
   files anyway?
 - Is losing a session on restart a problem in practice?

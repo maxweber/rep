@@ -127,14 +127,6 @@
     (output/close! output)
     (deliver done outcome)))
 
-(defn- value-of
-  "Evaluates the request. A bash script is one call of `sh`, Clojure code
-   runs in the session's context."
-  [w ctx {:evaluation/keys [kind]} body]
-  (case kind
-    :shell (context/sh w body)
-    :clojure (sci/eval-string* ctx body)))
-
 (defn- run
   "The whole life of an evaluation on its thread. The printed text and
    the value go into the output. As with `bb -e`, nil is not printed. A
@@ -146,7 +138,7 @@
                   (binding [context/*evaluation* evaluation
                             *out* writer
                             *err* writer]
-                    (let [value (value-of w ctx evaluation body)]
+                    (let [value (sci/eval-string* ctx body)]
                       (when-not (or (nil? value) (context/quiet? value))
                         (prn value))
                       (flush)
@@ -177,11 +169,10 @@
 (defn- start!
   "Makes the evaluation's folder and record, and starts its thread."
   [{:rep/keys [evaluations output-limit] :as w}
-   {:request/keys [session id kind body base-url]}]
+   {:request/keys [session id body base-url]}]
   (let [state (session-state w session)
         dir (folder w session id)
         record {:state :running
-                :kind kind
                 :sha256 (sha256 body)
                 :started (System/currentTimeMillis)}
         _ (fs/create-dirs dir)
@@ -189,7 +180,6 @@
         _ (write-record! w session id record)
         evaluation {:evaluation/session session
                     :evaluation/id id
-                    :evaluation/kind kind
                     :evaluation/base-url base-url
                     :evaluation/record record
                     :evaluation/output (output/open (output-file w session id) output-limit)
@@ -207,9 +197,8 @@
      :submit/evaluation evaluation}))
 
 (defn submit!
-  "Takes a request to evaluate `:request/body` (`:request/kind` :clojure
-   or :shell) as evaluation `:request/id` of `:request/session`, and adds
-   `:submit/answer`:
+  "Takes a request to evaluate the code `:request/body` as evaluation
+   `:request/id` of `:request/session`, and adds `:submit/answer`:
 
    :started   a new evaluation runs now. `:submit/session` tells whether
               the session is :started, :continued or :restarted, and
@@ -219,7 +208,7 @@
    :conflict  the id was used before with another request.
    :busy      the session runs `:submit/running`. A session evaluates
               one request at a time."
-  [{:rep/keys [lock] :as w} {:request/keys [session id kind body] :as request}]
+  [{:rep/keys [lock] :as w} {:request/keys [session id body] :as request}]
   (locking lock
     (let [known (or (some-> (running w session id) :evaluation/record)
                     (read-record w session id))
@@ -227,8 +216,7 @@
       (merge w
              request
              (cond
-               (and known (or (not= kind (:kind known))
-                              (not= (sha256 body) (:sha256 known))))
+               (and known (not= (sha256 body) (:sha256 known)))
                {:submit/answer :conflict}
 
                known
@@ -262,7 +250,7 @@
   (require '[rep.server :as server])
   (def w (server/prepare {:rep/dir "work"}))
   (def answer (submit! w {:request/session "s1" :request/id "e1"
-                          :request/kind :clojure :request/body "(+ 1 2)"}))
+                          :request/body "(+ 1 2)"}))
   @(:evaluation/done (:submit/evaluation answer))
   (status w "s1" "e1")
   (slurp (output-file w "s1" "e1")))

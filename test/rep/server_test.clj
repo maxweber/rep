@@ -31,14 +31,18 @@
   []
   (str (random-uuid)))
 
+(defn bash
+  "The code that runs `script` with bash."
+  [script]
+  (str "(sh " (pr-str script) ")"))
+
 (defn evaluate
-  "POSTs `code`. Options: `:id`, `:shell?`, `:as`."
+  "POSTs `code`. Options: `:id`, `:as`."
   ([w session code]
    (evaluate w session code nil))
-  ([w session code {:keys [id shell? as]}]
+  ([w session code {:keys [id as]}]
    (http/post (address w "/rep/" session "/" (or id (uuid)))
-              (cond-> {:headers (cond-> {"Authorization" (str "Bearer " token)}
-                                  shell? (assoc "Content-Type" "text/x-shellscript"))
+              (cond-> {:headers {"Authorization" (str "Bearer " token)}
                        :body code
                        :throw false}
                 as (assoc :as as)))))
@@ -122,15 +126,19 @@
                  (select-keys (outcome response) ["rep-status" "rep-exit"])))))
       (testing "the result is data for the code"
         (is (= "3\n" (:body (evaluate w (uuid) "(:exit (sh \"exit 3\"))")))))
-      (testing "a body sent as a shell script needs no quoting at all"
-        (let [response (evaluate w (uuid) "echo \"it's $((1+2)) \\\"quoted\\\"\"\nexit 4\n" {:shell? true})]
-          (is (= "it's 3 \"quoted\"\n" (:body response)))
-          (is (= "4" (get (:headers response) "rep-exit")))))
+      (testing "a script uploaded as a file runs without any quoting"
+        (let [session (uuid)
+              upload (edn/read-string (:body (evaluate w session "(upload-url \"scripts/run.sh\")")))]
+          (is (= 201 (:status (http/put upload {:body "echo \"it's $((1+2)) \\\"quoted\\\"\"\nexit 4\n"
+                                                :throw false}))))
+          (let [response (evaluate w session "(sh \"bash scripts/run.sh\")")]
+            (is (= "it's 3 \"quoted\"\n" (:body response)))
+            (is (= "4" (get (:headers response) "rep-exit"))))))
       (testing "bash runs in the work folder, without the server's token"
         (is (= (str (fs/real-path (:rep/dir w)) "\n")
-               (:body (evaluate w (uuid) "pwd -P" {:shell? true}))))
+               (:body (evaluate w (uuid) (bash "pwd -P")))))
         (is (= "none\n"
-               (:body (evaluate w (uuid) "echo ${REP_TOKEN:-none}" {:shell? true}))))))))
+               (:body (evaluate w (uuid) (bash "echo ${REP_TOKEN:-none}")))))))))
 
 (deftest idempotency-test
   (with-system {}
@@ -159,7 +167,7 @@
       (let [session (uuid)
             id (uuid)
             started (System/currentTimeMillis)
-            response (evaluate w session "echo one; sleep 1; echo two" {:id id :shell? true :as :stream})
+            response (evaluate w session (bash "echo one; sleep 1; echo two") {:id id :as :stream})
             in (:body response)
             buffer (byte-array 100)
             first-chunk (String. buffer 0 (.read in buffer) "UTF-8")
@@ -179,7 +187,7 @@
     (fn [w]
       (let [session (uuid)
             id (uuid)
-            long-running (future (evaluate w session "echo started; sleep 30" {:id id :shell? true}))]
+            long-running (future (evaluate w session (bash "echo started; sleep 30") {:id id}))]
         (Thread/sleep 300)
         (testing "a session evaluates one request at a time"
           (let [response (evaluate w session "(+ 1 2)")]
@@ -252,7 +260,7 @@
         before (server/start! (server/prepare options))]
     (try
       (is (= "#'user/a\n" (:body (evaluate before session "(def a 1)" {:id finished}))))
-      (future (evaluate before session "echo begun; sleep 30" {:id cut-off :shell? true}))
+      (future (evaluate before session (bash "echo begun; sleep 30") {:id cut-off}))
       (Thread/sleep 300)
       (server/stop! before)
       (let [after (server/start! (server/prepare options))]
@@ -278,7 +286,7 @@
 (deftest output-limit-test
   (with-system {:rep/output-limit 1000}
     (fn [w]
-      (let [response (evaluate w (uuid) "yes | head -c 100000" {:shell? true})]
+      (let [response (evaluate w (uuid) (bash "yes | head -c 100000"))]
         (is (= "failed" (get (:headers response) "rep-status")))
         (is (< (count (:body response)) 1200))
         (is (str/includes? (:body response) "The output passed its limit of 1000 bytes."))))))
