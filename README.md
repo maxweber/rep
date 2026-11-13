@@ -101,6 +101,10 @@ earlier definitions are gone. Keep what must survive in files.
 On my laptop a session starts in about 0.3 seconds and holds about 95 MB. A
 later request takes about 50 ms.
 
+While a session runs, babashka keeps the port of its nREPL server in the file
+`.nrepl-port` in the work folder. An editor can attach there and see the same
+definitions. With several sessions the file names the newest one.
+
 ## Bash
 
 A model learned bash from raw bash output. So the output of a script goes into

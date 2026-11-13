@@ -74,8 +74,12 @@
     (catch java.io.IOException _ nil)))
 
 (defn- end!
+  "Ends the process and waits a moment until it is gone. On its way out
+   babashka removes the `.nrepl-port` file it keeps in the work folder,
+   and a caller that deletes that folder next should not race with it."
   [child]
   (process/destroy-tree child)
+  (.waitFor (:proc child) 3 java.util.concurrent.TimeUnit/SECONDS)
   (swap! children disj child)
   nil)
 
