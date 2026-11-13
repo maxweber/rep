@@ -541,6 +541,8 @@ tell it otherwise.
   connection talks to http-kit. It serves 1024 connections at once and closes
   one more. A client that stops reading in the middle of a download holds its
   thread and the open file until it hangs up.
+- Behind the door http-kit sees every connection come from 127.0.0.1. rep
+  never looks at a caller's address.
 - The door answers a file request when it has read it. A client that sends a
   request before it has the answer to the one before, which HTTP allows and
   no browser does, could get the two answers out of order.

@@ -41,7 +41,10 @@
    still owes it.
 
    A connection costs a thread, two once it has talked to http-kit.
-   `max-connections` bounds them."
+   `max-connections` bounds them. http-kit sees every connection come
+   from 127.0.0.1, so a handler that wants the client's address reads
+   it from the request the door hands it, or from a header a proxy
+   set."
   (:require [clojure.string :as str]))
 
 (def slice-bytes
