@@ -265,11 +265,14 @@ Two more things keep an upload in parts safe:
   that is a 413 with a sentence. A signed URL is good for many parts, so
   without the limit it could fill the disk.
 - `&upload=<id>` names the upload a part belongs to, an id the sender makes up
-  once per upload. The part at offset 0 puts the id on record. A later part
-  with another id is a 409 without `Rep-File-Size` that says another upload
-  writes the file, so two senders of one path do not mix their parts
-  unnoticed. `&resume=true` on a later part takes the file over for its id.
-  A part without an id is taken as before.
+  once per upload. The part at offset 0 puts the id on record, and every later
+  part needs a record with its own id. A part with another id, a part whose
+  upload is not on record, and a part without an id while an upload is on
+  record are each a 409 without `Rep-File-Size` that says why. So two senders
+  of one path do not mix their parts unnoticed. `&resume=true` on a later part
+  takes the file over for its id. An upload that sent no part for 15 minutes
+  is over and off the record. While no upload is on record, a part without an
+  id is taken as before, and so is a plain PUT of a whole file.
 
 A GET with a `Range` header answers 206 with that part of the file, at most
 8 MB of it, and `Content-Range` says how many bytes the file has. The range is

@@ -235,52 +235,93 @@
   ([url body offset id more]
    (http/put (str url "&offset=" offset "&upload=" id more) {:body body :throw false})))
 
+(defn- stored-at
+  "Hands the part `body` of the upload `id` at `offset` to `store!`
+   itself, with the clock at `now-ms`. `url` is a signed URL of the
+   system `w`. Answers the status."
+  [w url body offset id now-ms]
+  (let [[_ uri query] (re-find #"^https?://[^/]+(/[^?]*)\?(.*)$" url)]
+    (:status (files/store! (assoc w :rep/now-ms now-ms)
+                           {:request-method :put
+                            :uri uri
+                            :query-string (str query "&offset=" offset (when id (str "&upload=" id)))
+                            :headers {}
+                            :body (java.io.ByteArrayInputStream. (.getBytes body "UTF-8"))}))))
+
 (deftest upload-id-test
   (with-system {}
     (fn [w]
       (let [url (upload-url w "in/shared.txt")
-            stored (fs/file (:rep/dir w) "in" "shared.txt")]
+            stored (fs/file (:rep/dir w) "in" "shared.txt")
+            refused? (fn [answer start]
+                       (and (= 409 (:status answer))
+                            (nil? (size-header answer))
+                            (str/starts-with? (:body answer) start)))]
         (testing "the part at offset 0 puts its upload on record, and the upload goes on"
           (is (= 201 (:status (put-as url "aaa" 0 "upload-a"))))
           (is (= 201 (:status (put-as url "aaa" 3 "upload-a"))))
           (is (= "aaaaaa" (slurp stored))))
         (testing "a part of another upload is a 409 that says so and changes nothing, even at the right offset"
-          (let [answer (put-as url "bbb" 6 "upload-b")]
-            (is (= 409 (:status answer)))
-            (is (str/starts-with? (:body answer) "Another upload writes in/shared.txt."))
-            (is (nil? (size-header answer)) "it is not the 409 of a wrong offset"))
+          (is (refused? (put-as url "bbb" 6 "upload-b") "Another upload writes in/shared.txt."))
+          (is (= "aaaaaa" (slurp stored))))
+        (testing "a part without an id does not pass into an upload that has one, at the right offset or at 0"
+          (is (refused? (put url "ccc" 6) "An upload writes in/shared.txt, and this part names none."))
+          (is (refused? (put url "ccc" 0) "An upload writes in/shared.txt, and this part names none."))
+          (is (refused? (put url "ccc") "An upload writes in/shared.txt, and this part names none.")
+              "a PUT of the whole file is such a part too")
           (is (= "aaaaaa" (slurp stored))))
         (testing "the upload on record goes on as if nothing happened"
           (is (= "9" (size-header (put-as url "aaa" 6 "upload-a")))))
         (testing "with resume=true another upload takes the file over, and the first one is told"
           (is (= 201 (:status (put-as url "bbb" 9 "upload-b" "&resume=true"))))
-          (is (= 409 (:status (put-as url "aaa" 12 "upload-a"))))
+          (is (refused? (put-as url "aaa" 12 "upload-a") "Another upload writes in/shared.txt."))
           (is (= 201 (:status (put-as url "bbb" 12 "upload-b"))))
           (is (= "aaaaaaaaabbbbbb" (slurp stored))))
         (testing "a wrong offset of the right upload is still the 409 that says the size"
           (is (= "15" (size-header (put-as url "bbb" 99 "upload-b")))))
-        (testing "a part without an id is taken as before"
-          (is (= 201 (:status (put url "ccc" 15))))
-          (is (= "aaaaaaaaabbbbbbccc" (slurp stored))))
-        (testing "offset 0 starts the file over for whoever sends it"
+        (testing "offset 0 with an id starts the file over for whoever sends it, and the upload before is told"
           (is (= 201 (:status (put-as url "ddd" 0 "upload-d"))))
-          (is (= 409 (:status (put-as url "bbb" 3 "upload-b"))))
+          (is (refused? (put-as url "bbb" 3 "upload-b") "Another upload writes in/shared.txt."))
           (is (= "ddd" (slurp stored))))
-        (testing "a first part without an id clears the record, any upload may go on then"
-          (is (= 201 (:status (put url "eee" 0))))
-          (is (= 201 (:status (put-as url "fff" 3 "upload-f"))))
-          (is (= 409 (:status (put-as url "ddd" 6 "upload-d"))))
-          (is (= "eeefff" (slurp stored))))
         (testing "the record is beside rep's own files, not among the work folder's"
           (is (= ["shared.txt"] (map fs/file-name (fs/list-dir (fs/parent stored)))))
-          (is (= 1 (count (fs/list-dir (fs/path (:rep/state-dir w) "uploads"))))))
-        (testing "records of uploads that began more than :rep/keep-days ago are deleted"
-          (let [now (System/currentTimeMillis)
-                day (* 24 60 60 1000)]
-            (is (= 0 (files/forget-uploads! (assoc w :rep/now-ms (+ now (* 6 day))))))
-            (is (= 0 (files/forget-uploads! (assoc w :rep/now-ms (+ now (* 400 day)) :rep/keep-days 0))))
-            (is (= 1 (files/forget-uploads! (assoc w :rep/now-ms (+ now (* 8 day))))))
-            (is (= 201 (:status (put-as url "ggg" 6 "upload-g"))) "an upload that still ran goes on under its id")))))))
+          (is (= 1 (count (fs/list-dir (fs/path (:rep/state-dir w) "uploads")))))))))
+  (testing "a part with an id above offset 0 needs a record with that id: a file without a record refuses it"
+    (with-system {}
+      (fn [w]
+        (let [url (upload-url w "in/plain.txt")
+              stored (fs/file (:rep/dir w) "in" "plain.txt")]
+          (is (= 201 (:status (put url "aaa" 0))) "a part without an id, and so without a record")
+          (is (= 201 (:status (put url "aaa" 3))) "which goes on as before while no upload is on record")
+          (let [answer (put-as url "bbb" 6 "upload-b")]
+            (is (= 409 (:status answer)))
+            (is (nil? (size-header answer)))
+            (is (str/starts-with? (:body answer) "No upload with this id writes in/plain.txt.")))
+          (is (= "aaaaaa" (slurp stored)))
+          (testing "with resume=true it takes the file over, and from then on a part without an id is refused"
+            (is (= 201 (:status (put-as url "bbb" 6 "upload-b" "&resume=true"))))
+            (is (= 409 (:status (put url "ccc" 9))))
+            (is (= "aaaaaabbb" (slurp stored))))))))
+  (testing "an upload that sent no part for 15 minutes is over"
+    (with-system {}
+      (fn [w]
+        (let [url (upload-url w "in/idle.txt")
+              stored (fs/file (:rep/dir w) "in" "idle.txt")
+              now (System/currentTimeMillis)
+              minutes #(+ now (* % 60 1000))]
+          (is (= 201 (stored-at w url "aaa" 0 "upload-a" now)))
+          (is (= 201 (stored-at w url "aaa" 3 "upload-a" (minutes 14))) "a part within the 15 minutes keeps it on record")
+          (is (= 409 (stored-at w url "ccc" 6 nil (minutes 28))) "and counts from that part on")
+          (testing "then its own next part is refused like a stranger's, it has to resume"
+            (is (= 409 (stored-at w url "aaa" 6 "upload-a" (minutes 30)))))
+          (testing "and a part without an id is taken again"
+            (is (= 201 (stored-at w url "ccc" 6 nil (minutes 30))))
+            (is (= "aaaaaaccc" (slurp stored))))
+          (testing "the sweep deletes the records of uploads that are over, and no other"
+            (is (= 201 (stored-at w url "ddd" 0 "upload-d" (minutes 40))))
+            (is (= 0 (files/forget-uploads! (assoc w :rep/now-ms (minutes 50)))))
+            (is (= 1 (files/forget-uploads! (assoc w :rep/now-ms (minutes 56)))))
+            (is (empty? (fs/list-dir (fs/path (:rep/state-dir w) "uploads"))))))))))
 
 (defn- slowly
   "A stand-in for a function of the HTTP client that waits `ms` before

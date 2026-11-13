@@ -169,6 +169,13 @@
   part-lock
   (Object.))
 
+(def upload-idle-ms
+  "How long an upload may send no part before it counts as over: 15
+   minutes, as long as a signed URL holds. Its record is no record from
+   then on, so that an upload that ended, or was given up, does not keep
+   the file to itself."
+  (* 15 60 1000))
+
 (defn- upload-record
   "The file that names the upload that writes `path` right now, in the
    state folder beside the work folder's files. Nil for a system
@@ -177,27 +184,50 @@
   (when state-dir
     (fs/path state-dir "uploads" (hmac "rep upload" path))))
 
+(defn- live?
+  "True when the upload record `record` got a part within
+   `upload-idle-ms`. The clock is `:rep/now-ms`, the system's without
+   it."
+  [{:rep/keys [now-ms]} record]
+  (and (fs/regular-file? record)
+       (< (- (or now-ms (System/currentTimeMillis))
+             (fs/file-time->millis (fs/last-modified-time record)))
+          upload-idle-ms)))
+
 (defn- writer
-  "The id of the upload that writes `path`, nil when none is on record."
+  "The id of the upload that writes `path` right now, nil when none is
+   on record or the one on record sent no part for `upload-idle-ms`."
   [w path]
   (let [record (upload-record w path)]
-    (when (and record (fs/regular-file? record))
+    (when (and record (live? w record))
       (not-empty (str/trim (slurp (fs/file record)))))))
 
 (defn- note-writer!
-  "Keeps on record which upload writes `path` after its part at
-   `offset` went in. The part at offset 0 starts the file over, so its
-   upload is the writer from there on, and a part without an id clears
-   the record. A later part puts its id on record when none is there,
-   or when it took the file over."
-  [w path {:part/keys [offset upload]}]
-  (when-let [record (upload-record w path)]
-    (cond
-      upload (when (not= upload (writer w path))
-               (fs/create-dirs (fs/parent record))
-               (spit (fs/file record) upload))
-      (zero? offset) (fs/delete-if-exists record)))
+  "Puts the upload `:part/upload` on record as the one that writes
+   `path`, with now as the time of its last part. A part without an id
+   leaves no record."
+  [{:rep/keys [now-ms] :as w} path {:part/keys [upload]}]
+  (when-let [record (and upload (upload-record w path))]
+    (fs/create-dirs (fs/parent record))
+    (spit (fs/file record) upload)
+    (when now-ms
+      (fs/set-last-modified-time record (java.nio.file.attribute.FileTime/fromMillis now-ms))))
   nil)
+
+(defn- refusal
+  "Why the part may not go into the file that the upload `recorded`
+   writes, as a keyword, or nil when it may. A part of an upload has an
+   id: it is taken when it starts the file over at offset 0, when it
+   takes the file over with `:part/resume?`, or when its id is the one
+   on record. So a later part needs a record with its own id, and a
+   missing record refuses it like another upload's. A part without an
+   id is taken only while no upload is on record."
+  [recorded {:part/keys [offset upload resume?]}]
+  (cond
+    (and upload (or (zero? offset) resume? (= upload recorded))) nil
+    (and upload recorded) :another-upload
+    upload :no-upload
+    recorded :no-id))
 
 (defn- write-part!
   "Puts `:part/body` at `:part/offset` of `target`, the file of `path`.
@@ -205,20 +235,19 @@
    appends. Answers `:part/size`, the bytes the file holds then.
    Otherwise it writes nothing and answers the reason:
 
-     :part/taken      another upload writes this file: the part is not
-                      the first one and names another `:part/upload`
-                      than the one on record, without `:part/resume?`
+     :part/refused    the part does not belong to the upload that writes
+                      this file, see `refusal`
      :part/too-large  the file would grow past this many bytes
      :part/conflict   the part does not start where the file ends, the
                       value is the bytes the file holds"
-  [w target path {:part/keys [offset body length upload resume?] :as part}]
+  [w target path {:part/keys [offset body length] :as part}]
   (locking part-lock
     (let [held (size target)
-          recorded (writer w path)
+          refused (refusal (writer w path) part)
           limit (* 1024 1024 (or (:rep/max-file-mb w) max-file-mb))]
       (cond
-        (and (pos? offset) upload recorded (not= upload recorded) (not resume?))
-        {:part/taken recorded}
+        refused
+        {:part/refused refused}
 
         (< limit (+ offset length))
         {:part/too-large limit}
@@ -234,6 +263,15 @@
               (io/copy body out)))
           (note-writer! w path part)
           {:part/size (size target)})))))
+
+(def refusals
+  "The sentence for each reason of `refusal`. `%s` is the path."
+  {:another-upload (str "Another upload writes %s. This part belongs to an upload that does not."
+                        " Start over at offset 0, or take the file over with resume=true.")
+   :no-upload (str "No upload with this id writes %s. An upload that sent no part for 15 minutes is over."
+                   " Start over at offset 0, or go on with resume=true.")
+   :no-id (str "An upload writes %s, and this part names none."
+               " Send upload=<an id of your own> with offset=0 to start the file over.")})
 
 (defn- body-length
   "How many bytes the body of `request` has."
@@ -257,12 +295,16 @@
    would pass that is a 413.
 
    `upload=<id>` names the upload a part belongs to, an id its sender
-   made up. The part at offset 0 puts the id on record. A later part
-   with another id is a 409 without `Rep-File-Size` that says another
-   upload writes the file, so two senders of one path never mix their
-   parts unnoticed. With `resume=true` a later part takes the file over
-   for its id, which is how a sender goes on after it lost its own. A
-   part without an id is taken as before."
+   made up. The part at offset 0 puts the id on record, and every part
+   after it needs a record with its own id. A part with another id, a
+   part whose upload is not on record, and a part without an id while
+   an upload is on record are each a 409 without `Rep-File-Size` that
+   says why, so two senders of one path never mix their parts
+   unnoticed. With `resume=true` a later part takes the file over for
+   its id, which is how a sender goes on after it lost its own. An
+   upload that sent no part for 15 minutes is over and off the record.
+   While no upload is on record, a part without an id is taken as
+   before."
   [w {:keys [body query-string] :as request}]
   (let [{:file/keys [path refused] :as w} (check w request)
         {:strs [upload resume] given "offset"} (query query-string)
@@ -276,16 +318,15 @@
 
       :else
       (let [target (file w path)
-            {:part/keys [size conflict taken too-large]}
+            {:part/keys [size conflict refused too-large]}
             (write-part! w target path {:part/offset offset
                                         :part/body body
                                         :part/length (body-length request)
                                         :part/upload (not-empty upload)
                                         :part/resume? (= "true" resume)})]
         (cond
-          taken
-          (text 409 (str "Another upload writes " path ". This part belongs to an upload that does not."
-                         " Start over at offset 0, or take the file over with resume=true.\n"))
+          refused
+          (text 409 (str (format (get refusals refused) path) "\n"))
 
           too-large
           (text 413 (str path " would grow past " (quot too-large (* 1024 1024))
@@ -303,20 +344,16 @@
                 {size-header (str size)}))))))
 
 (defn forget-uploads!
-  "Deletes the records of uploads that began more than `:rep/keep-days`
-   ago (7 without the option, never with 0). The clock is `:rep/now-ms`
-   in epoch milliseconds, the system's clock without it. An upload that
-   still runs then puts its id on record again with its next part.
-   Answers how many records it deleted."
-  [{:rep/keys [state-dir keep-days now-ms]}]
-  (let [days (or keep-days 7)
-        before (- (or now-ms (System/currentTimeMillis)) (* days 24 60 60 1000))
-        folder (when state-dir (fs/path state-dir "uploads"))
-        old (when (and folder (pos? days) (fs/directory? folder))
-              (filterv #(< (fs/file-time->millis (fs/last-modified-time %)) before)
-                       (fs/list-dir folder)))]
-    (run! fs/delete-if-exists old)
-    (count old)))
+  "Deletes the records of uploads that are over: those that got no part
+   for `upload-idle-ms`. The clock is `:rep/now-ms` in epoch
+   milliseconds, the system's clock without it. Answers how many
+   records it deleted."
+  [{:rep/keys [state-dir] :as w}]
+  (let [folder (when state-dir (fs/path state-dir "uploads"))
+        over (when (and folder (fs/directory? folder))
+               (filterv #(not (live? w %)) (fs/list-dir folder)))]
+    (run! fs/delete-if-exists over)
+    (count over)))
 
 (defn byte-range
   "What the `Range` header asks for in a file of `length` bytes: nil
