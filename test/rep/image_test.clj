@@ -527,4 +527,8 @@
 (deftest cli-options-test
   (is (= {:rep/shared-image? true :rep/port 9000 :rep/dir "work"}
          (server/cli-options ["--shared-image" "--port" "9000" "--dir" "work"])))
-  (is (= {:rep/port 9000} (server/cli-options ["--port" "9000"]))))
+  (is (= {:rep/port 9000} (server/cli-options ["--port" "9000"])))
+  (testing "the extra classpath is a list with commas"
+    (is (= {:rep/class-path ["shop/src" "/opt/shop/resources"]}
+           (server/cli-options ["--class-path" "shop/src,/opt/shop/resources"])))
+    (is (= {:rep/class-path ["7"]} (server/cli-options ["--class-path" "7"])))))

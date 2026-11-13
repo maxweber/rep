@@ -141,7 +141,7 @@ next answer carries `Rep-Session: restarted` and the client says that the
 earlier definitions are gone. Keep what must survive in files.
 
 On my laptop a session starts in about 0.3 seconds and holds about 95 MB. A
-later request takes about 50 ms.
+later request takes about 7 ms.
 
 While a session runs, babashka keeps the port of its nREPL server in the file
 `.nrepl-port` in the work folder. An editor can attach there and see the same
@@ -277,7 +277,7 @@ More options for a host. The docstring of `rep.server/prepare` has the rest.
 
 | Option | What it does |
 |---|---|
-| `:rep/class-path` | A vector of paths that the session's babashka gets on its classpath, after the server's own. |
+| `:rep/class-path` | A vector of paths that the session's babashka gets on its classpath, after the server's own. `bb serve --class-path a,b` sets it from the command line. |
 | `:rep/shared-image?` | All sessions evaluate in one process, see the next section. |
 | `:rep/after-evaluation` | `(fn [w evaluation])`. Runs after every evaluation of a POST. `evaluation` has `:evaluation/session`, `:evaluation/id`, `:evaluation/state`, which is `:done` or `:failed`, `:evaluation/exit` and `:evaluation/code`. |
 | `:rep/on-image-start` | `(fn [w image])`. Runs after every start of the shared image that worked, its setup code included. `image` has `:image/generation`, `:image/pid`, `:image/port` and `:image/start-ms`. |

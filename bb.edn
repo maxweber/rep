@@ -1,6 +1,6 @@
 {:paths ["src"]
  :tasks
- {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--shared-image]"
+ {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--class-path a,b] [--shared-image]"
          :requires ([rep.server])
          :task (apply rep.server/-main *command-line-args*)}
   code {:doc "Makes a login code: bb code [--dir work]"

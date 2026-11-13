@@ -345,6 +345,21 @@
         (testing "the session goes on"
           (is (= "3\n" (:body (evaluate w session "(+ 1 2)")))))))))
 
+(deftest speed-test
+  (testing "an evaluation takes a few milliseconds, not the 40 ms that a late acknowledgement adds"
+    (when (with-open [socket (java.net.Socket.)]
+            (some #(= "TCP_QUICKACK" (str %)) (.supportedOptions socket)))
+      (doseq [shared? [false true]]
+        (with-system {:rep/shared-image? shared?}
+          (fn [w]
+            (let [session (uuid)
+                  _ (evaluate w session ":warm")
+                  begun (System/currentTimeMillis)]
+              (dotimes [_ 20]
+                (evaluate w session "(+ 1 2)"))
+              (is (< (- (System/currentTimeMillis) begun) 600)
+                  (str "twenty evaluations, shared image " shared?)))))))))
+
 (deftest help-test
   (with-system {}
     (fn [w]

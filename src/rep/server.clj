@@ -268,7 +268,8 @@
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
    :rep/class-path    a vector of paths that the session's babashka gets on
-                      its classpath, after the server's own
+                      its classpath, after the server's own. On the command
+                      line `--class-path a,b`
    :rep/port :rep/ip  where to listen, 8730 on 127.0.0.1
    :rep/output-limit  the most bytes one evaluation may write
    :rep/max-body      the largest request body, uploads included
@@ -372,23 +373,27 @@
    :dir {:desc "Work folder (work)"}
    :public-url {:desc "How the outside reaches the server"}
    :prelude {:desc "A Clojure file every session loads when it starts"}
+   :class-path {:coerce :string
+                :desc "More paths for the classpath of the sessions, separated by commas"}
    :shared-image {:coerce :boolean
                   :desc "All sessions evaluate in one process that starts with the server"}})
 
 (defn cli-options
   "The options for `prepare` from the arguments of `bb serve`."
   [args]
-  (let [{:keys [port ip dir public-url prelude shared-image]} (cli/parse-opts args {:spec cli-spec})]
+  (let [{:keys [port ip dir public-url prelude class-path shared-image]} (cli/parse-opts args {:spec cli-spec})]
     (cond-> {}
       port (assoc :rep/port port)
       ip (assoc :rep/ip ip)
       dir (assoc :rep/dir dir)
       public-url (assoc :rep/public-url public-url)
       prelude (assoc :rep/prelude prelude)
+      class-path (assoc :rep/class-path (vec (remove str/blank? (str/split class-path #","))))
       shared-image (assoc :rep/shared-image? true))))
 
 (defn -main
-  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE] [--shared-image]"
+  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE]
+            [--class-path PATH,PATH] [--shared-image]"
   [& args]
   (let [w (-> (cli-options args)
               (prepare)
@@ -411,7 +416,7 @@
   ;; curl -s -H 'Authorization: Bearer dev' --data-binary '(+ 1 2)' \
   ;;   http://127.0.0.1:8730/rep/$(uuidgen)/$(uuidgen)
 
-  (cli-options ["--port" "8730" "--shared-image"])
+  (cli-options ["--port" "8730" "--shared-image" "--class-path" "shop/src,shop/resources"])
 
   ;; a host with an HTTP server of its own mounts the handler
   (def w (image/start! (prepare {:rep/token "dev" :rep/shared-image? true})))

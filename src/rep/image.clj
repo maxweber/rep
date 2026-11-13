@@ -360,7 +360,6 @@
                            "code" (nrepl/wrapped code)})
   (loop [result {}]
     (.setSoTimeout socket (int (max 1 (- deadline (System/currentTimeMillis)))))
-    (nrepl/quick-ack! connection)
     (let [{:keys [out err value status] :as message} (nrepl/receive! connection)]
       (if (not= id (:id message))
         (recur result)
