@@ -671,7 +671,7 @@
                                          :rep/vouched {"sub" "the host's own caller"}
                                          :body (java.io.ByteArrayInputStream. (.getBytes "(+ 1 2)" "UTF-8"))})]
             (is (= 200 (:status answer)))
-            (is (str/includes? (str (:body answer)) "3"))))
+            (is (str/includes? (let [body (:body answer)] (if (string? body) body (slurp body))) "3"))))
         (testing "nobody says it over HTTP: a header of that name is a header"
           (is (= 401 (:status (http/put (file-address w "outside.txt")
                                         {:headers {"rep-vouched" "{\"sub\":\"me\"}"} :body "x" :throw false})))))))))
