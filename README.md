@@ -187,8 +187,10 @@ tests with Node.
 
 `bb serve` without a public key makes a key pair in memory, prints one token
 for the session `laptop` that holds for a day, and forgets the private key.
-Nothing of it is on disk and a restart ends the token. With a public key the
-server never makes a token.
+Nothing of it is on disk and a restart ends the token. It does that on
+127.0.0.1 only: with `--ip 0.0.0.0` and no public key it does not start, so a
+server that forgot its key prints no working token into a log. With a public
+key the server never makes a token.
 
 ## Sessions
 

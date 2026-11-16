@@ -273,6 +273,9 @@
       (is (<= (- (+ (auth/now) 86400) 5) (get claims "exp") (+ (auth/now) 86400)))
       (testing "the next start makes another key, so the token of this one is worth nothing there"
         (is (nil? (auth/claims (#'server/trial {:rep/audience nil}) (:trial/token made)))))
+      (testing "and only for a server that this machine alone reaches"
+        (is (every? server/local? ["127.0.0.1" "127.0.0.2" "localhost" "::1"]))
+        (is (not-any? server/local? ["0.0.0.0" "192.168.1.5" "::" "machine.example" "127.0.0.1.example" "" nil])))
       (testing "it keeps the name of the machine when one is configured"
         (let [named (#'server/trial {:rep/audience "my-laptop"})]
           (is (= "my-laptop" (:rep/audience named) (get (auth/claims named (:trial/token named)) "aud"))))))))

@@ -570,6 +570,20 @@
                                "exp" (+ (auth/now) trial-seconds)}
                               private-key)}))
 
+(defn local?
+  "True when `ip` is an address that only this machine reaches."
+  [ip]
+  (let [ip (str ip)]
+    (boolean (or (contains? #{"localhost" "::1"} ip)
+                 (re-matches #"127\.\d+\.\d+\.\d+" ip)))))
+
+(defn- give-up!
+  "Ends `bb serve` with `sentence` on standard error."
+  [sentence]
+  (binding [*out* *err*]
+    (println (str "rep: " sentence)))
+  (System/exit 1))
+
 (defn -main
   "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--prelude FILE]
             [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32] [--door]
@@ -577,10 +591,22 @@
    With `REP_PUBLIC_KEYS` and `REP_AUDIENCE` the server verifies the
    tokens of whoever holds the private key, and makes none itself.
    Without a public key it is a try on a laptop: it prints one token of
-   a key pair that lives in this process only, see `trial`."
+   a key pair that lives in this process only, see `trial`. It does
+   that on an address of this machine only. A server that forgot its
+   key and listens to others would else print a token that works into
+   its log, so it does not start."
   [& args]
-  (let [prepared (prepare (cli-options args))
-        made (when (empty? (:rep/public-keys prepared))
+  (let [prepared (try
+                   (prepare (cli-options args))
+                   (catch clojure.lang.ExceptionInfo e
+                     (if (:rep/error (ex-data e))
+                       (give-up! (ex-message e))
+                       (throw e))))
+        keyless? (empty? (:rep/public-keys prepared))
+        _ (when (and keyless? (not (local? (:rep/ip prepared))))
+            (give-up! (str "No public key is configured. Set REP_PUBLIC_KEYS and REP_AUDIENCE. Without them rep "
+                           "prints a token of its own, and it does that only on 127.0.0.1, for a try on a laptop.")))
+        made (when keyless?
                (trial prepared))
         w (start! (merge prepared (dissoc made :trial/token)))
         url (str "http://" (:rep/ip w) ":" (:rep/port w))]
@@ -598,10 +624,10 @@
                       "hands out its tokens."))
         (println (str "export REP_URL=" url))
         (println (str "export REP_TOKEN=" (:trial/token made))))
-      (println (str "Callers send a token for the audience " (pr-str (:rep/audience w)) ", signed with "
+      (println (str "Callers send a token for the audience " (pr-str (:rep/audience w)) ", signed with the private key of "
                     (if (= 1 (count (:rep/public-keys w)))
-                      "the configured public key's other half."
-                      (str "the other half of one of the " (count (:rep/public-keys w)) " configured public keys.")))))
+                      "the configured public key."
+                      (str "one of the " (count (:rep/public-keys w)) " configured public keys.")))))
     @(promise)))
 
 (comment
