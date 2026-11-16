@@ -178,6 +178,81 @@
         (is (not= payload other))
         (is (= {:auth/refused :signature} (auth/check w (str header "." other "." signature))))))))
 
+(deftest named-keys-test
+  (let [one (token/key-pair)
+        two (token/key-pair)
+        kid-one (auth/key-id (:token/public-key one))
+        kid-two (auth/key-id (:token/public-key two))
+        listed (auth/jwks (json/generate-string {"keys" [(auth/jwk (:token/public-key one))
+                                                         (auth/jwk (:token/public-key two))]}))
+        w {:rep/public-keys listed :rep/audience "machine"}
+        claims {"aud" "machine" "sub" "max" "exp" (+ (auth/now) 60)}
+        signed (fn [pair kid] (token/sign claims (:token/private-key pair) kid))]
+    (testing "the name of a key is the base64url of the first 8 bytes of the SHA-256 of its 32 raw bytes, and a JWK holds those bytes: worked out with openssl and sha256sum for the vectors' first key"
+      (is (= "boWZnFUYgf8" (auth/key-id (get-in vectors ["keys" "first"]))))
+      (is (= {"kty" "OKP" "crv" "Ed25519" "kid" "boWZnFUYgf8" "x" "pmWJM7J5JKNVvjKrjWmIq_0FdC6EwgCtmgfXXJGhixY"}
+             (auth/jwk (get-in vectors ["keys" "first"]))))
+      (is (= #{kid-one kid-two} (set (keys listed)))))
+    (testing "the kid chooses the key, among the server's own keys and nowhere else"
+      (is (= claims (:auth/claims (auth/check w (signed one kid-one)))))
+      (is (= claims (:auth/claims (auth/check w (signed two kid-two)))))
+      (is (= {:auth/refused :signature} (auth/check w (signed one kid-two))) "the key the kid names, and no other, is tried")
+      (is (= {:auth/refused :unknown-key} (auth/check w (signed one "another"))))
+      (is (= {:auth/refused :unknown-key} (auth/check w (token/sign claims (:token/private-key one))))
+          "a token without a kid names no key")
+      (is (= {:auth/refused :unknown-key} (auth/check w (signed (token/key-pair) "made-up")))))
+    (testing "a function of the kid stands for a list that changes: it is asked once for a token, with the kid, and before the payload is read"
+      (let [asked (atom [])
+            w (assoc w :rep/public-keys (fn [kid] (swap! asked conj kid) (get listed kid)))]
+        (is (= claims (:auth/claims (auth/check w (signed one kid-one)))))
+        (is (= {:auth/refused :unknown-key} (auth/check w (signed one "another"))))
+        (is (= [kid-one "another"] @asked))
+        (is (= {:auth/refused :malformed} (auth/check w "a.b")))
+        (is (= {:auth/refused :algorithm} (auth/check w (str/replace (signed one kid-one) #"^[^.]+" "eyJhbGciOiJub25lIn0"))))
+        (is (= 2 (count @asked)) "a token that is refused before its signature asks for no key")))
+    (testing "what is no Ed25519 key with a name is left out of a JWK set, and a text that is none throws"
+      (is (= {} (auth/jwks "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"a\"},{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"AAAA\",\"kid\":\"short\"},{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"pmWJM7J5JKNVvjKrjWmIq_0FdC6EwgCtmgfXXJGhixY\"}]}")))
+      (is (thrown-with-msg? Exception #"Not a JWK set" (auth/jwks "[]")))
+      (is (thrown-with-msg? Exception #"Not a JWK set" (auth/jwks "no json"))))
+    (testing "prepare takes named keys and a function as they are, and wants the audience with them"
+      (is (identical? listed (:rep/public-keys (server/prepare {:rep/public-keys listed :rep/audience "machine"
+                                                                :rep/dir (str (fs/create-temp-dir {:prefix "rep-named"}))}))))
+      (is (thrown-with-msg? Exception #"needs the name" (server/prepare {:rep/public-keys (fn [_] nil)}))))))
+
+(deftest issuer-and-claims-test
+  (let [pair (token/key-pair)
+        w {:rep/public-keys (auth/public-keys (:token/public-key pair))
+           :rep/audience "machine"
+           :rep/issuer "https://issuer.example"
+           :rep/claims {"org" "org-1"}
+           :rep/leeway 30}
+        now 1700000000
+        signed (fn [claims]
+                 (token/sign (merge {"aud" "machine" "iss" "https://issuer.example" "org" "org-1" "exp" (+ now 60)} claims)
+                             (:token/private-key pair)))
+        check (fn [claims] (auth/check w (signed claims)))]
+    (with-redefs [auth/now (constantly now)]
+      (testing "the issuer has to be the server's, and a claim the server asks for has to have its value"
+        (is (:auth/claims (check {})))
+        (is (= {:auth/refused :issuer} (check {"iss" "https://another.example"})))
+        (is (= {:auth/refused :issuer} (auth/check w (token/sign {"aud" "machine" "org" "org-1" "exp" (+ now 60)}
+                                                                 (:token/private-key pair))))
+            "no iss at all")
+        (is (= {:auth/refused :claim} (check {"org" "org-2"})))
+        (is (= {:auth/refused :claim} (auth/check w (token/sign {"aud" "machine" "iss" "https://issuer.example" "exp" (+ now 60)}
+                                                                (:token/private-key pair))))
+            "no org at all")
+        (is (= {:auth/refused :claim} (check {"org" nil}))))
+      (testing "a server without them reads neither"
+        (is (:auth/claims (auth/check (dissoc w :rep/issuer :rep/claims) (signed {"iss" "anybody" "org" "any"})))))
+      (testing "a token counts for the leeway past its exp and no second longer"
+        (is (:auth/claims (check {"exp" (- now 29)})))
+        (is (= {:auth/refused :expired} (check {"exp" (- now 30)})))
+        (is (= {:auth/refused :expired} (check {"exp" (- now 31)})))
+        (is (= {:auth/refused :expired} (auth/check (dissoc w :rep/leeway) (signed {"exp" now}))) "without a leeway none")
+        (is (:auth/claims (check {"nbf" (+ now 29)})))
+        (is (= {:auth/refused :not-yet-valid} (check {"nbf" (+ now 31)})))))))
+
 (deftest session-test
   (testing "sid names the session, else sub"
     (is (= (auth/session {"sid" "desk"}) (auth/session {"sid" "desk" "sub" "max"})))

@@ -128,13 +128,21 @@
 (defn- claims
   "The claims of the token that `request` carries, or nil when it is
    refused. Says on standard error that a request was refused and why,
-   and nothing of the request: neither its path nor its token."
+   and nothing of the request: neither its path nor its token.
+
+   A host that owns the HTTP server and let the caller in by a check
+   of its own says so with `:rep/vouched` in the request, a map of
+   claims with string keys: then no token is asked for. No HTTP server
+   puts that key into a request, so only the host's own code can."
   [w request]
-  (let [{:auth/keys [claims refused]} (auth/check w (bearer request))]
-    (when refused
-      (binding [*out* *err*]
-        (println "rep: a request was refused:" (get auth/reasons refused))))
-    claims))
+  (if-let [vouched (:rep/vouched request)]
+    (when (map? vouched)
+      vouched)
+    (let [{:auth/keys [claims refused]} (auth/check w (bearer request))]
+      (when refused
+        (binding [*out* *err*]
+          (println "rep: a request was refused:" (get auth/reasons refused))))
+      claims)))
 
 (defn- file
   "Answers a request to `/file/<path>`, which needs the bearer token as
@@ -308,10 +316,22 @@
                       of such texts, also `REP_PUBLIC_KEYS`. A key is the
                       base64 of its SubjectPublicKeyInfo or its PEM file,
                       see `rep.auth/public-keys`. Without a key every
-                      request is refused. A text that is no key throws
+                      request is refused. A text that is no key throws.
+                      Or keys with names, of which a token's `kid` chooses
+                      one: a map of a name to its key (`rep.auth/jwks`
+                      reads a JWK set), or a function of a name, for a
+                      host whose list changes
    :rep/audience      the name of this machine, which the `aud` of a token
                       has to hold, also `REP_AUDIENCE`. A server with keys
                       and without it throws
+   :rep/issuer        what the `iss` of a token has to be, for a server
+                      that takes one issuer's tokens. Without it `iss` is
+                      not read
+   :rep/claims        more claims a token has to have, a map of a claim's
+                      name to its value, {\"org\" \"...\"} say
+   :rep/leeway        for how many seconds past its `exp` a token still
+                      counts, 0. For a machine whose clock lags after it
+                      woke
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
    :rep/setup-ms      how long the setup of a fresh process may take, the
@@ -377,7 +397,7 @@
         state-dir (str (or (:rep/state-dir options) (fs/path dir ".rep")))
         public-keys (auth/public-keys (or (:rep/public-keys options) (env "REP_PUBLIC_KEYS") []))
         audience (or (:rep/audience options) (env "REP_AUDIENCE"))]
-    (when (and (seq public-keys) (str/blank? audience))
+    (when (and (or (fn? public-keys) (seq public-keys)) (str/blank? audience))
       (throw (ex-info (str "A server with public keys needs the name a token's aud has to hold: "
                            "set :rep/audience or REP_AUDIENCE.")
                       {:rep/error :audience})))

@@ -148,12 +148,36 @@ What the server checks, and nothing else lets a token in:
   than 4096 characters.
 - The header's `alg` is exactly `EdDSA`. A token with `none` or `HS256` is
   refused whatever its signature says.
-- One of the configured keys verifies the signature. Nothing in the token
-  chooses a key: `kid`, `jwk`, `jku`, `x5u` and `x5c` are ignored. A header
-  with `crit` is refused.
+- One of the configured keys verifies the signature. A key never comes from
+  a token: `jwk`, `jku`, `x5u` and `x5c` are ignored. A header with `crit`
+  is refused.
 - `exp` is there and lies ahead. `nbf`, when it is there, lies behind. The
-  server allows no slack for a clock that is off.
+  server allows no slack for a clock that is off, unless a host sets
+  `:rep/leeway`.
 - `aud` is there and is the server's audience, or an array that has it.
+
+A host that mounts the handler in its own program (`rep.server/prepare`) can
+ask for more, and none of it has a variable of the environment:
+
+- **Keys with names.** `:rep/public-keys` as a map of a name to its key, or
+  as a function of a name that answers the key or nil. Then the header's
+  `kid` chooses the key, among the server's own and nowhere else, and a
+  token whose `kid` names none is refused. `rep.auth/jwks` reads the JWK set
+  an issuer publishes, `{"keys":[{"kty":"OKP","crv":"Ed25519","kid":...,
+  "x":...}]}`, into such a map, and `rep.auth/key-id` names a key: the
+  base64url of the first 8 bytes of the SHA-256 of its 32 raw bytes. The
+  function is for a host whose list comes from an address and changes: the
+  host fetches and keeps it, rep asks once for every token.
+  `rep.token/sign` takes the `kid` as its third argument.
+- **`:rep/issuer`**: what `iss` has to be.
+- **`:rep/claims`**: more claims a token has to have, a map of a claim's
+  name to its value.
+- **`:rep/leeway`**: for how many seconds past its `exp` a token still
+  counts.
+- **A host that vouches.** A host that let a caller in by a check of its own
+  puts `:rep/vouched`, a map of claims, into the request it hands to
+  `rep.server/handle`. No token is asked for then. No HTTP server puts that
+  key into a request, so only the host's code can.
 
 Two more claims name the session of a `POST /rep`: `sid` when the token has
 one, else `sub`. A text that is a UUID is the session as it stands. Any other

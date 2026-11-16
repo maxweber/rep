@@ -645,3 +645,33 @@
               (is (empty? @session/children) "the process that hung is gone")))))
       (finally
         (fs/delete prelude)))))
+
+(deftest vouched-test
+  (with-system
+    {}
+    (fn [w]
+      (let [request (fn [more]
+                      (merge {:request-method :put
+                              :uri "/file/vouched.txt"
+                              :scheme :http
+                              :headers {}
+                              :body (java.io.ByteArrayInputStream. (.getBytes "from the host" "UTF-8"))}
+                             more))]
+        (testing "a host that owns the HTTP server and let the caller in itself says so in the request, and rep asks for no token"
+          (is (= 401 (:status (server/handle w (request {})))))
+          (is (< (:status (server/handle w (request {:rep/vouched {"sub" "the host's own caller"}}))) 300))
+          (is (= "from the host" (slurp (str (fs/path (:rep/dir w) "vouched.txt"))))))
+        (testing "what is no map of claims vouches for nothing"
+          (is (= 401 (:status (server/handle w (request {:rep/vouched true}))))))
+        (testing "the session of a vouched POST is the one its claims name"
+          (let [answer (server/handle w {:request-method :post
+                                         :uri "/rep"
+                                         :scheme :http
+                                         :headers {}
+                                         :rep/vouched {"sub" "the host's own caller"}
+                                         :body (java.io.ByteArrayInputStream. (.getBytes "(+ 1 2)" "UTF-8"))})]
+            (is (= 200 (:status answer)))
+            (is (str/includes? (str (:body answer)) "3"))))
+        (testing "nobody says it over HTTP: a header of that name is a header"
+          (is (= 401 (:status (http/put (file-address w "outside.txt")
+                                        {:headers {"rep-vouched" "{\"sub\":\"me\"}"} :body "x" :throw false})))))))))

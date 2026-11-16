@@ -117,8 +117,8 @@
                     "the resident memory grew by less than 256 MB for a file of 4500 MB")))))
         (testing "a range of it is answered as before"
           (let [answer (http/get url {:headers (assoc authorized "Range" (str "bytes=" (- bytes 10) "-"))
-                                       :as :bytes
-                                       :throw false})]
+                                      :as :bytes
+                                      :throw false})]
             (is (= 206 (:status answer)))
             (is (= (vec (take-last 10 last-part)) (vec (:body answer))))))))))
 
@@ -240,7 +240,7 @@
         (testing "a GET without the token, or with a wrong one, is refused by the handler the door asks"
           (is (= 401 (:status (http/get (file-address w "note.txt") {:throw false}))))
           (is (= 401 (:status (http/get (file-address w "note.txt") {:headers {"Authorization" "Bearer wrong"}
-                                                                   :throw false}))))
+                                                                     :throw false}))))
           (is (= 401 (:status (http/head (file-address w "note.txt") {:throw false})))))))))
 
 (deftest parse-head-test

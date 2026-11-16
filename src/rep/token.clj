@@ -60,15 +60,22 @@
    that lies ahead, and without `aud`, the server's `:rep/audience` or
    an array that has it. `sid`, else `sub`, names the session of a
    POST to /rep. A token cannot be revoked, so give it the shortest
-   life that does the job."
-  [claims private-key]
-  (let [content (str (encode (.getBytes (json/generate-string {"alg" "EdDSA" "typ" "JWT"}) "UTF-8"))
-                     "."
-                     (encode (.getBytes (json/generate-string claims) "UTF-8")))
-        signer (doto (java.security.Signature/getInstance "Ed25519")
-                 (.initSign (read-key private-key))
-                 (.update (.getBytes content "US-ASCII")))]
-    (str content "." (encode (.sign signer)))))
+   life that does the job.
+
+   `kid` names the key in the token's header, for a server whose keys
+   have names (`rep.auth/key-id` of the public key)."
+  ([claims private-key]
+   (sign claims private-key nil))
+  ([claims private-key kid]
+   (let [content (str (encode (.getBytes (json/generate-string (cond-> {"alg" "EdDSA" "typ" "JWT"}
+                                                                 kid (assoc "kid" kid)))
+                                         "UTF-8"))
+                      "."
+                      (encode (.getBytes (json/generate-string claims) "UTF-8")))
+         signer (doto (java.security.Signature/getInstance "Ed25519")
+                  (.initSign (read-key private-key))
+                  (.update (.getBytes content "US-ASCII")))]
+     (str content "." (encode (.sign signer))))))
 
 (comment
   (def pair (key-pair))
