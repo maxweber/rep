@@ -9,6 +9,7 @@
         :task (let [namespaces '[rep.auth-test
                                  rep.server-test
                                  rep.files-test
+                                 rep.readme-test
                                  rep.door-test
                                  rep.image-test]]
                 (apply require namespaces)

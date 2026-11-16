@@ -10,38 +10,45 @@ knows how to send an HTTP request and how to read bash output. With rep that
 is enough to work on another machine: run code there, keep definitions between
 requests, run bash, move files in and out.
 
+There is no client to install. The protocol is a POST with a token in a
+header, so `curl` is the client.
+
 This is an experiment and it runs on babashka only.
 
 ## Try it
 
-Start a server. It prints a login code that works once.
+Start a server. Without a public key it is a try on a laptop: it prints one
+token that holds for a day.
 
 ```
 bb serve --port 8730 --dir work
 ```
 
-Log in with the client, then talk to the server. The client reads the code to
-evaluate from standard input.
+Copy the two `export` lines it prints into another terminal, then talk to the
+server.
 
+<!-- test: evaluate -->
 ```
-export REP_URL=http://127.0.0.1:8730
-bin/rep login 7K3M-9QWX-2B4T
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary '(+ 1 2)' "$REP_URL/rep"
+```
 
-bin/rep <<'EOF'
-(def files (clojure.string/split-lines (slurp "list.txt")))
-(count files)
+Code with quotes or more than one line goes through a heredoc, as you wrote
+it.
+
+<!-- test: define -->
+```
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary @- "$REP_URL/rep" <<'EOF'
+(def greeting "it's \"quoted\",
+on two lines")
+(count greeting)
 EOF
 ```
 
-Or with curl.
+The definition is still there in the next call.
 
+<!-- test: use -->
 ```
-curl -s -X POST --data-binary "7K3M-9QWX-2B4T" "$REP_URL/login" -o ~/.rep-token
-SESSION=$(uuidgen)
-
-curl -s -H "Authorization: Bearer $(cat ~/.rep-token)" \
-  --data-binary '(+ 1 2)' \
-  "$REP_URL/rep/$SESSION/$(uuidgen)"
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary '(println greeting)' "$REP_URL/rep"
 ```
 
 `(help)` tells what a session offers.
@@ -51,19 +58,24 @@ curl -s -H "Authorization: Bearer $(cat ~/.rep-token)" \
 There is one call.
 
 ```
-POST /rep/<session>/<id>
+POST /rep
 Authorization: Bearer <token>
 
 <Clojure code>
 ```
 
-`<session>` and `<id>` are UUIDs the caller makes up. The answer is plain
-text, in the order things happened: what the code printed, then the value of
-its last form as EDN. As with `bb -e`, a `nil` value prints nothing. An error
-ends the request at its first failing form and prints as babashka prints it,
-with line and column.
+The answer is plain text, in the order things happened: what the code
+printed, then the value of its last form as EDN. As with `bb -e`, a `nil`
+value prints nothing. An error ends the request at its first failing form and
+prints as babashka prints it, with line and column.
 
-The outcome is in the headers, so the text needs no frame around it.
+<!-- test: error -->
+```
+curl -si -H "Authorization: Bearer $REP_TOKEN" --data-binary '(/ 1 0)' "$REP_URL/rep"
+```
+
+The outcome is in the headers, so the text needs no frame around it. An agent
+reads the text, a program reads the headers.
 
 | Header | Values |
 |---|---|
@@ -72,54 +84,111 @@ The outcome is in the headers, so the text needs no frame around it.
 | `Rep-Session` | `started`, `continued`, `restarted` |
 | `Rep-Evaluation` | `new`, `replayed` |
 
+The session comes from the token, so one token is one REPL and the caller
+keeps no session file. A caller that wants more says so in the path.
+
+```
+POST /rep/<session>         another session, a UUID the caller makes up
+POST /rep/<session>/<id>    and an id of its own for the evaluation, a UUID too
+```
+
+Without an id the server makes one. With an id a POST is safe to send again,
+see "Evaluation ids".
+
 A POST waits up to a second for the evaluation. Most finish in that time and
 answer with `Rep-Status: done`. A longer one answers `Rep-Status: running` and
-streams its output until it ends. The same POST again, with
-`?from=<bytes received>`, then gives the final headers.
+streams its output until it ends.
 
-Other answers: 401 without the token, 400 for ids that are no UUIDs, 409 for an
-id that was used with other code, 405 for anything but a POST.
+Other answers: 401 without a token the server accepts, 400 for a session or an
+id that is no UUID, 409 for an id that was used with other code, 405 for
+anything but a POST.
 
-Two more routes move files and two log a caller in and out, see below.
-`GET /` answers a short text that explains all of this to an agent.
+Two more routes move files, see "Files". `GET /` answers a short text that
+explains all of this to an agent.
 
-## Logging in
-
-A secret that passes through a chat should be worth little. So the server
-hands out a login code that works once and for ten minutes. The caller
-exchanges it for a token and keeps the token itself.
-
+<!-- test: usage -->
 ```
-POST /login     body = the code, answer = the token and nothing else
-POST /logout    ends the token it is sent with
+curl -s "$REP_URL/"
 ```
 
-`rep login <code>` does the exchange and stores the token in
-`~/.config/rep/<host>-<port>.token`, readable by the user only. It never
-prints the token and leaves nothing in the current folder. `rep logout` ends
-the token and deletes the file. With curl, write the answer of `/login`
-straight into a file, as in the example above, so that the token never shows
-up in a transcript.
+## Tokens
 
-Only a POST looks at a code. A chat app that fetches a pasted link for a
-preview burns nothing.
+rep does not log anybody in. A token is a JWT that somebody else signed with
+an Ed25519 private key, and the server verifies it against the public key. It
+needs no secret for that and keeps nothing on disk. Whoever runs the machine
+hands out the tokens: a host program, a script, a service somewhere else.
 
-On the server's side:
+The server takes two settings, as options of `rep.server/prepare` or from the
+environment.
+
+| Option | Variable | What it is |
+|---|---|---|
+| `:rep/public-keys` | `REP_PUBLIC_KEYS` | The public keys of whoever signs the tokens. One or several. |
+| `:rep/audience` | `REP_AUDIENCE` | The name of this machine. A token's `aud` has to hold it. |
+
+A public key is written in one of two forms.
+
+- The base64 of its X.509 SubjectPublicKeyInfo. That is 60 characters that
+  start with `MCowBQYDK2VwAyEA`, the one line in the middle of a PEM file.
+- The PEM file itself, `-----BEGIN PUBLIC KEY-----` and what follows, as
+  `openssl pkey -pubout` prints it.
+
+Several keys stand in one text, apart by commas, blanks or line breaks. Two
+keys are for the day an issuer changes its own. The server refuses to start
+with a text that is no Ed25519 public key, and with keys but no audience.
 
 ```
-bb code [--dir work]           makes another login code
-bb tokens [--dir work]         lists the tokens that are still good
-bb revoke <jti> [--dir work]   ends one
+openssl genpkey -algorithm ed25519 -out issuer.pem
+REP_PUBLIC_KEYS="$(openssl pkey -in issuer.pem -pubout)" REP_AUDIENCE=my-machine bb serve
 ```
 
-The token is a JWT, signed with HMAC-SHA256, good for 30 days. The server
-keeps a small file per token and refuses a token without its file, which is
-how `bb revoke` and `/logout` work. The signing key is the file `secret` in
-the state folder, or `REP_SECRET`.
+What the server checks, and nothing else lets a token in:
 
-For tests and automation, set `REP_TOKEN` on the server. That static token is
-then accepted as a bearer too, and the client sends it when it finds it in its
-own environment.
+- The token has three parts in base64url without padding and is no longer
+  than 4096 characters.
+- The header's `alg` is exactly `EdDSA`. A token with `none` or `HS256` is
+  refused whatever its signature says.
+- One of the configured keys verifies the signature. Nothing in the token
+  chooses a key: `kid`, `jwk`, `jku`, `x5u` and `x5c` are ignored. A header
+  with `crit` is refused.
+- `exp` is there and lies ahead. `nbf`, when it is there, lies behind. The
+  server allows no slack for a clock that is off.
+- `aud` is there and is the server's audience, or an array that has it.
+
+Two more claims name the session of a `POST /rep`: `sid` when the token has
+one, else `sub`. A text that is a UUID is the session as it stands. Any other
+text becomes one, the name-based UUID of its UTF-8 bytes
+(`java.util.UUID/nameUUIDFromBytes`). So `sub` gives every person a REPL, and
+`sid` gives one person two. A token with neither works for
+`POST /rep/<session>` only.
+
+Every refused request gets the same 401 and the same sentence. The reason
+goes to the server's standard error, one line without anything of the request
+in it.
+
+A host on babashka signs with `rep.token`. It is not part of the server and
+the server never calls it, except for the token of a try on a laptop.
+
+```clojure
+(require '[rep.token :as token])
+
+(def pair (token/key-pair))
+;; {:token/public-key "MCowBQYDK2VwAyEA..." :token/private-key "..."}
+
+(token/sign {"aud" "my-machine"
+             "sub" "max"
+             "exp" (+ (quot (System/currentTimeMillis) 1000) 3600)}
+            (:token/private-key pair))
+```
+
+`sign` also takes the PEM file of a private key. Any other tool that signs a
+JWT with Ed25519 does as well: `test/rep/vectors.mjs` makes the tokens of the
+tests with Node.
+
+`bb serve` without a public key makes a key pair in memory, prints one token
+for the session `laptop` that holds for a day, and forgets the private key.
+Nothing of it is on disk and a restart ends the token. With a public key the
+server never makes a token.
 
 ## Sessions
 
@@ -130,15 +199,14 @@ It is full babashka: `slurp`, `spit`, `future`, atoms, `Thread/sleep`,
 directory is the work folder. A server can also run one process for all
 sessions, see "One shared image" below.
 
-rep adds four functions to `user`: `sh`, `upload-url`, `download-url` and
-`help`.
+rep adds two functions to `user`: `sh` and `help`.
 
 A session takes a second request while the first still runs. They share all
 definitions.
 
 A session lives in memory. When its process ends, or the server restarts, the
-next answer carries `Rep-Session: restarted` and the client says that the
-earlier definitions are gone. Keep what must survive in files.
+next answer carries `Rep-Session: restarted`, and the earlier definitions are
+gone. Keep what must survive in files.
 
 On my laptop a session starts in about 0.3 seconds and holds about 95 MB. A
 later request takes about 7 ms.
@@ -153,9 +221,10 @@ A model learned bash from raw bash output. So the output of a script goes into
 the answer as bash wrote it, standard error included and in order, with no
 JSON and no Clojure string around it.
 
+<!-- test: bash -->
 ```
-bin/rep <<'EOF'
-(sh "ffmpeg -version | head -1")
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary @- "$REP_URL/rep" <<'EOF'
+(sh "uname -s; ls nothing-here")
 EOF
 ```
 
@@ -165,18 +234,13 @@ folder. A `cd` or a variable does not carry over to the next one.
 `(with-out-str (sh script))` gives the output as a string.
 
 On the way in, the script is a Clojure string, so the caller escapes `"` and
-`\`. A script that is awkward to quote goes up as a file and runs from there:
+`\`. A script that is awkward to quote goes up as a file and runs from there.
 
+<!-- test: script -->
 ```
-URL=$(bin/rep <<'EOF'
-(print (upload-url "scripts/cut.sh"))
-EOF
-)
-curl -s -X PUT --data-binary @cut.sh "$URL"
+curl -s -H "Authorization: Bearer $REP_TOKEN" -T cut.sh "$REP_URL/file/scripts/cut.sh"
 
-bin/rep <<'EOF'
-(sh "bash scripts/cut.sh")
-EOF
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary '(sh "bash scripts/cut.sh")' "$REP_URL/rep"
 ```
 
 ## Long work
@@ -185,15 +249,17 @@ There is no call to follow or stop an evaluation. Clojure has what it takes.
 Start the work in a future, keep the result in an atom, ask in a later
 request.
 
+<!-- test: future -->
 ```
-bin/rep <<'EOF'
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary @- "$REP_URL/rep" <<'EOF'
 (def result (atom nil))
 (def job (future (reset! result (with-out-str (sh "./render.sh")))))
 EOF
+```
 
-bin/rep <<'EOF'
-[(realized? job) @result]
-EOF
+<!-- test: ask -->
+```
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary '[(realized? job) @result]' "$REP_URL/rep"
 ```
 
 `(future-cancel job)` ends it, and the script with it. What a future prints
@@ -205,11 +271,30 @@ can end the script with `(sh "pkill -f render.sh")`. The last resort is
 and the next one starts a new process.
 
 The evaluation itself does not depend on the connection that started it. When
-the caller hangs up, it runs on, and the same POST again follows it.
+the caller hangs up, it runs on. An agent that expects a long answer or a
+shaky line gives the POST two UUIDs of its own.
+
+<!-- test: ids -->
+```
+SESSION=$(uuidgen); ID=$(uuidgen)
+```
+
+<!-- test: long -->
+```
+curl -s -H "Authorization: Bearer $REP_TOKEN" --data-binary @job.clj "$REP_URL/rep/$SESSION/$ID"
+```
+
+Did the connection drop? Send the same command again, with the same id.
+Nothing runs twice: the answer comes from its first byte and follows the
+evaluation to its end. `?from=<bytes you have>` asks for the rest only.
+
+A session the path names is not the token's session. What a `POST /rep`
+defined is not in it, so an agent that works this way stays with its
+`$SESSION`.
 
 ## Evaluation ids
 
-The id in the URL makes a POST safe to repeat. The server keeps the request,
+An id in the URL makes a POST safe to repeat. The server keeps the request,
 the output and the outcome of every evaluation on disk.
 
 - The same id with the same code runs nothing. It answers the first output,
@@ -219,9 +304,12 @@ the output and the outcome of every evaluation on disk.
   `Rep-Status: interrupted`. The server cannot know how far it got and does not
   pretend to.
 
-The client makes a fresh id for every call and reuses it when it asks again. A
-model should not invent ids by hand. If it repeats one, an old answer comes
-back as if it were new.
+Make a fresh id for every new piece of code, with `uuidgen`. A model should
+not invent ids by hand. If it repeats one, an old answer comes back as if it
+were new, and only the header `Rep-Evaluation: replayed` says so.
+
+A POST without an id gets one from the server. Nobody else knows it, so the
+same POST again is a new evaluation and runs its code again.
 
 The server keeps an evaluation for seven days (`:rep/keep-days`). It deletes
 older ones when it starts and once a day after that. An id that old is
@@ -230,26 +318,37 @@ everything.
 
 ## Files
 
-`(upload-url "in/clip.mp4")` answers a URL that takes a PUT.
-`(download-url "out/final.mp4")` answers one for a GET. Both need no token and
-expire after 15 minutes, or after the seconds given as a second argument. They
-only reach into the work folder. What counts is where a path leads: a symbolic
-link in the work folder that leads out of it, or into rep's own `.rep` folder
-with the signing key, is as forbidden as the place it leads to.
+Two routes move a file of the work folder, with the same header as an
+evaluation.
 
 ```
-bin/rep <<'EOF'
-(print (upload-url "in/clip.mp4"))
-EOF
+PUT /file/<path>    the body becomes the file
+GET /file/<path>    answers the file, HEAD its length alone
 ```
+
+<!-- test: put -->
+```
+curl -s -H "Authorization: Bearer $REP_TOKEN" -T clip.mp4 "$REP_URL/file/in/clip.mp4"
+```
+
+<!-- test: get -->
+```
+curl -s -H "Authorization: Bearer $REP_TOKEN" -o final.mp4 "$REP_URL/file/out/final.mp4"
+```
+
+They only reach into the work folder. What counts is where a path leads: a
+symbolic link in the work folder that leads out of it, or into rep's own
+`.rep` folder with the output of every caller's evaluations, is as forbidden
+as the place it leads to. A request without a token gets its 401 before the
+server says anything about a path.
 
 The server holds a request body in memory before it looks at a route or a
-credential. So it takes no body above 32 MB (`:rep/max-body`,
+token. So it takes no body above 32 MB (`:rep/max-body`,
 `bb serve --max-body-mb`) and answers a larger one with a 413. A larger file
-comes in parts through the same signed URL:
+comes in parts.
 
 ```
-PUT /file/<path>?expires=...&signature=...&offset=<n>
+PUT /file/<path>?offset=<n>
 ```
 
 - `offset=0` starts the file over.
@@ -257,15 +356,28 @@ PUT /file/<path>?expires=...&signature=...&offset=<n>
 - Any other offset is a 409 that changes nothing.
 
 Every answer says how many bytes the file holds, in its text and in the header
-`Rep-File-Size`. A caller that lost an answer sends the part again, reads the
-size from the 409 and goes on from there. A PUT without `offset` is the whole
-file, as before.
+`Rep-File-Size`. So the sender needs no count of its own. This loop sends
+8 MB a request and takes the next offset from the server.
+
+<!-- test: parts-up -->
+```
+SIZE=$(wc -c < clip.mp4); OFFSET=0
+while [ "$OFFSET" -lt "$SIZE" ]; do
+  OFFSET=$(tail -c +$((OFFSET + 1)) clip.mp4 | head -c 8388608 |
+    curl -sf -H "Authorization: Bearer $REP_TOKEN" -T - -o /dev/null \
+      -w '%header{rep-file-size}' "$REP_URL/file/in/clip.mp4?offset=$OFFSET") || break
+done
+```
+
+It stops at the first part the server refuses. An upload that was cut goes on
+where it stopped: start the loop with `OFFSET` at the bytes the server has,
+which `(.length (java.io.File. "in/clip.mp4"))` tells.
 
 Two more things keep an upload in parts safe:
 
 - A file grows to 4096 MB at most (`:rep/max-file-mb`). A part that would pass
-  that is a 413 with a sentence. A signed URL is good for many parts, so
-  without the limit it could fill the disk.
+  that is a 413 with a sentence. A path takes one part after the other, so
+  without the limit a file could fill the disk.
 - `&upload=<id>` names the upload a part belongs to, an id the sender makes up
   once per upload. The part at offset 0 puts the id on record, and every later
   part needs a record with its own id. A part with another id, a part whose
@@ -274,44 +386,35 @@ Two more things keep an upload in parts safe:
   of one path do not mix their parts unnoticed. `&resume=true` on a later part
   takes the file over for its id. An upload that sent no part for 15 minutes
   is over and off the record. While no upload is on record, a part without an
-  id is taken as before, and so is a plain PUT of a whole file.
+  id is taken, and so is a plain PUT of a whole file.
 
 A plain GET answers the whole file with its length in `Content-Length`, and a
 HEAD answers the length alone. That holds for a file up to 2 GB. http-kit
 sends the answer and sets the limit: it puts the body into one buffer, and a
 buffer ends at 2 GB. A plain GET of a larger file gets a 400 that names the
-size and says how to fetch the file: in parts, which `rep download` does. A
-HEAD of such a file gets the same 400. The door, below, lifts the limit for
-whoever turns it on.
+size and says to fetch the file in parts. A HEAD of such a file gets the same
+400. The door, below, lifts the limit for whoever turns it on.
 
 A GET with a `Range` header answers 206 with that part of the file, at most
 8 MB of it, and `Content-Range` says how many bytes the file has. That works
 for a file of any size. The range is `bytes=<start>-<end>` or
 `bytes=<start>-`. Every other shape, and a range that names no byte of the
-file, is a 416.
+file, is a 416. `curl -r` sends the header, and this loop fetches a file of
+any size with it.
 
-The client does both:
-
+<!-- test: parts-down -->
 ```
-bin/rep upload clip.mp4 in/clip.mp4
-bin/rep download out/final.mp4 final.mp4
-```
-
-It asks the session for the signed URL and sends or fetches the file in parts
-of 8 MB. A signed URL holds for 15 minutes and a long transfer outlives it:
-when the server refuses the URL in the middle, the client asks the session for
-a fresh one and goes on at the same offset.
-
-`--resume` goes on with a transfer that was cut:
-
-```
-bin/rep upload --resume clip.mp4 in/clip.mp4       # asks how many bytes the server has, sends the rest
-bin/rep download --resume out/final.mp4 final.mp4  # goes on from the bytes that are here
+: > final.mp4; OFFSET=0; SIZE=1
+while [ "$OFFSET" -lt "$SIZE" ]; do
+  SIZE=$(curl -sf -H "Authorization: Bearer $REP_TOKEN" -r "$OFFSET-" -o part \
+    -w '%header{content-range}' "$REP_URL/file/out/final.mp4") || break
+  SIZE=${SIZE##*/}; cat part >> final.mp4; OFFSET=$(($(wc -c < final.mp4)))
+done
 ```
 
-A download writes to `final.mp4.part` and renames it at the end, so a download
-that breaks leaves no half `final.mp4`. `--resume` goes on from the part file,
-and without one it takes `final.mp4` itself for the part that came so far.
+A download that was cut goes on the same way: leave out the `: > final.mp4`
+and start with `OFFSET` at the bytes that came. Both loops need curl 7.84 or
+newer for `%header{}`.
 
 ### The door, for a file above 2 GB in one GET
 
@@ -322,9 +425,8 @@ bb serve --door
 `REP_DOOR=1` and the option `:rep/door? true` do the same. With the door a
 plain GET answers a file of any size in one request, with its length in
 `Content-Length`, and the server holds one megabyte of the file at a time
-(`:rep/slice-bytes`). That is for a browser or a `curl` that has to fetch a
-large file in one request. `rep download` needs no door, it fetches a file of
-any size in parts.
+(`:rep/slice-bytes`). That is for a `curl` that has to fetch a large file in
+one request. The loop above needs no door.
 
 The door (`rep.door`) is a listener of rep's own in front of http-kit. It has
 the public port, and http-kit listens on a port of 127.0.0.1 behind it. The
@@ -353,36 +455,38 @@ Do not put it on a port the internet reaches before the first two are:
 - A protocol upgrade, a WebSocket for example, cannot pass. Neither rep nor
   nchat uses one.
 
-## The client
-
-```
-rep [--id ID] [--wait SECONDS] < code   evaluates standard input, prints the answer
-rep upload [--resume] LOCAL PATH        sends a local file into the work folder, in parts
-rep download [--resume] PATH LOCAL      fetches a file of the work folder, in parts
-rep login CODE                          exchanges a login code for a token and stores it
-rep logout                              ends the stored token
-rep session                             prints the session id
-```
-
-It reads `REP_URL`. The token is `--token`, else `REP_TOKEN`, else the one
-`rep login` stored for that server. The session id comes from `REP_SESSION` or
-from the file `.rep-session` in the current folder, which the client makes on
-first use. One folder, one session.
-
-It ends with 0 when the code ran through, 1 when it failed and 2 when the
-server refused the request. With `--wait` it lets go after that many seconds
-and ends with 124, the exit code of `timeout`. The evaluation runs on. The same
-input again with the `--id` it names follows it to the end.
-
-Link `bin/rep` into your `PATH`. It finds its sources next to itself.
-
 ## In your own babashka program
+
+A program that calls rep speaks HTTP itself. This is all of it.
+
+<!-- test: babashka -->
+```clojure
+(require '[babashka.http-client :as http])
+
+(defn rep
+  "Evaluates `code` at the server. Answers its text and how it ended."
+  [code]
+  (let [{:keys [status headers body]}
+        (http/post (str (System/getenv "REP_URL") "/rep")
+                   {:headers {"Authorization" (str "Bearer " (System/getenv "REP_TOKEN"))}
+                    :body code
+                    :throw false})]
+    {:text body
+     :status (get headers "rep-status" (str "HTTP " status))}))
+
+(rep "(+ 1 2)")
+;; => {:text "3\n", :status "done"}
+```
+
+A program that hosts rep starts it with its options.
 
 ```clojure
 (require '[rep.server :as rep])
 
 (def system
   (rep/start! (rep/prepare {:rep/dir "work"
+                            :rep/public-keys "MCowBQYDK2VwAyEA..."
+                            :rep/audience "my-machine"
                             :rep/prelude "shop.clj"})))
 
 (rep/stop! system)
@@ -403,21 +507,31 @@ More options for a host. The docstring of `rep.server/prepare` has the rest.
 
 | Option | What it does |
 |---|---|
+| `:rep/public-keys` | The public keys of whoever signs the tokens, see "Tokens". Without one the server refuses every request. |
+| `:rep/audience` | The name of this machine that a token's `aud` has to hold. |
 | `:rep/class-path` | A vector of paths that the session's babashka gets on its classpath, after the server's own. `bb serve --class-path a,b` sets it from the command line. |
 | `:rep/setup-ms` | How long the setup of a fresh process may take, the prelude included. 60000 by default. |
 | `:rep/shared-image?` | All sessions evaluate in one process, see the next section. |
 | `:rep/door?` | Puts `rep.door` in front of http-kit, for a plain GET of a file above 2 GB. Off by default, see "The door". |
-| `:rep/after-evaluation` | `(fn [w evaluation])`. Runs after every evaluation of a POST. `evaluation` has `:evaluation/session`, `:evaluation/id`, `:evaluation/state`, which is `:done` or `:failed`, `:evaluation/exit` and `:evaluation/code`. |
+| `:rep/after-evaluation` | `(fn [w evaluation])`. Runs after every evaluation of a POST. `evaluation` has `:evaluation/session`, `:evaluation/id`, `:evaluation/state`, which is `:done` or `:failed`, `:evaluation/exit`, `:evaluation/code` and `:evaluation/claims`, all claims of the token the POST came with. |
 | `:rep/on-image-start` | `(fn [w image])`. Runs after every start of the shared image that worked, its setup code included. `image` has `:image/generation`, `:image/pid`, `:image/port` and `:image/start-ms`. |
 
 Both hooks run in the server's process. The server prints what a hook throws
 to standard error, and the request goes on as if nothing happened.
 
+A host that hands out the tokens of its machine makes the key pair itself,
+keeps the private key to itself and gives rep the public one. It puts what it
+wants to know later into the claims, a `run` next to a person's `sub` for
+example. `(rep.auth/claims w token)` answers all claims of a token the server
+accepts, and nil for every other.
+
 A host with an HTTP server of its own does not call `rep/start!`. It mounts
 the handler and passes on the requests that are rep's.
 
 ```clojure
-(def w (rep/prepare {:rep/dir "work"}))
+(def w (rep/prepare {:rep/dir "work"
+                     :rep/public-keys "MCowBQYDK2VwAyEA..."
+                     :rep/audience "my-machine"}))
 
 (defn handler [request]
   (if (rep/rep-path? (:uri request))
@@ -427,9 +541,12 @@ the handler and passes on the requests that are rep's.
 (rep/stop! w)
 ```
 
-A host that serves files of the work folder under a credential of its own, a
-cookie say, answers them with `(rep.files/serve w request path)`. It applies
-the path checks of the signed route and answers a `Range` the same way.
+A browser sends no `Authorization` header with a link or an upload form. So a
+host that moves files of the work folder for a page does it under a
+credential of its own, a cookie say, on a route of its own. It answers a
+download with `(rep.files/serve w request path)` and takes an upload with
+`(rep.files/store! w request path)`. Both apply the path checks of rep's own
+routes, and they answer a `Range` and take an `offset` the same way.
 
 A plain GET through the host's http-kit sends a file up to 2 GB. A larger one
 gets a 400 that says to fetch it in parts, and a `Range` works for any size. A
@@ -451,12 +568,12 @@ default for a reason:
 `:door/own?` says for a path whether the door answers a GET of it itself, by
 calling `handler`.
 
-`rep-path?` is true for `/login`, `/logout` and everything below `/rep/` and
-`/file/`. It is false for `/`, where the host has its own page. The host's
-server has to be http-kit, because a long evaluation streams its output over
-an http-kit channel. The host gives its server the limit for a request body
-itself, `(:rep/max-body w)` is rep's. `(rep/start-sweeper! w)` starts the
-daily deletion of old evaluations, which `rep/start!` does by itself.
+`rep-path?` is true for `/rep` and everything below `/rep/` and `/file/`. It
+is false for `/`, where the host has its own page. The host's server has to
+be http-kit, because a long evaluation streams its output over an http-kit
+channel. The host gives its server the limit for a request body itself,
+`(:rep/max-body w)` is rep's. `(rep/start-sweeper! w)` starts the daily
+deletion of old evaluations, which `rep/start!` does by itself.
 
 ## One shared image
 
@@ -488,9 +605,6 @@ bb serve --shared-image
   `:rep/backoff-max-ms` set the first and the longest pause. A prelude that
   only prints to standard error is no failed start, and one that does not come
   back within `:rep/setup-ms` is.
-- Evaluations run side by side, and two callers may reach the server under two
-  addresses. The address of each travels with its code, so `upload-url` and
-  `download-url` hand every caller a URL for its own.
 - `Rep-Session` keeps its meaning per session uuid. It says `started` for a
   uuid the server sees for the first time and `continued` afterwards. It says
   `restarted` when the image started again since that uuid's last evaluation,
@@ -538,12 +652,10 @@ HTTP server starts the image itself.
 
 `examples/rragent.clj` lets a session remote-control the
 [rragent](https://github.com/storrito/rragent) that runs on the same machine.
-Start the server with `--prelude examples/rragent.clj`, then:
+Start the server with `--prelude examples/rragent.clj`, then evaluate:
 
-```
-bin/rep <<'EOF'
+```clojure
 (rragent/ask! "Which skills do you offer?")
-EOF
 ```
 
 `send!` puts a message into the bot's chat the way the page's composer does,
@@ -559,14 +671,20 @@ shell login. A session is full babashka with the rights of the server's user.
 Run rep on a machine you can throw away. It listens on 127.0.0.1 unless you
 tell it otherwise.
 
-- An agent can read the token file that `rep login` stored. That is why a
-  token only works for this one server, expires and can be revoked.
-- The server hands a session neither a token nor the key that signs tokens.
-  A session gets a key derived from it that signs file URLs and nothing else.
-  But a session runs as the same user as the server, so its code can read the
-  file `secret` in the state folder, or the server's environment. Keeping a
-  session from that takes a second user or a sandbox, which rep does not set
-  up.
+- There is no revocation. A token is good until its `exp`, and the server
+  cannot end one before. The issuer has two answers to a token that got out.
+  The first is a short life: minutes for a run, hours for a person. The second
+  is a new key pair, which ends every token at once.
+- A token is good for every session of its server. `sid` and `sub` say where
+  a `POST /rep` goes, they keep no caller out of another caller's session.
+- The server holds no secret. A session's code can read the public key in the
+  server's environment, and a public key signs nothing. What the code can
+  still read is a token that a caller left on the machine, in a file or a
+  variable. A session does not inherit the variable `REP_TOKEN` from the
+  server's environment, and that is all the hiding there is: session and
+  server run as one user.
+- The server writes one line to standard error for every request it refuses.
+  Whoever reaches the port can make that log grow.
 - Sessions are never ended for being idle. Each one holds its 95 MB until the
   server stops.
 - Code that loops without calling anything, such as `(loop [] (recur))`,
@@ -574,13 +692,12 @@ tell it otherwise.
   request ends the whole session.
 - http-kit holds a request body in memory, whoever sends it: the limit of
   32 MB holds before the token is checked. That is what one connection can
-  make the server hold. A larger file has to come in parts, which
-  `rep upload` does. `curl -T` with one PUT stops at the limit.
+  make the server hold. A larger file has to come in parts, see "Files".
+  `curl -T` with one PUT stops at the limit.
 - One evaluation may write 10 MB of output. Then the server interrupts it and
   it fails with a line that says so.
-- Signed URLs work until they expire, more than once.
 - A plain GET sends a file up to 2 GB. A larger one comes in parts with
-  `Range`, which `rep download` does, or in one GET with the door on.
+  `Range`, or in one GET with the door on.
 - The door, when it is on, is an HTTP listener of our own in front of every
   request. Its tests are all the traffic it has seen, where a proven server
   has had years of it. That is why it is off by default.
@@ -603,12 +720,17 @@ tell it otherwise.
 - Does the agent reach for a future and an atom when work takes long, or does
   it wait on one request until its own shell tool gives up?
 - Is losing a session on restart a problem in practice?
+- Does an agent get by with `curl` alone, or does it miss a command that
+  follows a long answer and sends a file in parts for it?
 
 ## Tests
 
 ```
 bb test
 ```
+
+One of them takes the commands out of this file and runs them with `curl`
+against a real server, so the README cannot drift from the routes.
 
 ## License
 

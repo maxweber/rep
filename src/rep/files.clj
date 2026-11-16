@@ -87,6 +87,13 @@
     (.encodeToString (.withoutPadding (java.util.Base64/getUrlEncoder))
                      (.doFinal mac (.getBytes (str text) "UTF-8")))))
 
+(defn encode
+  "`path` for a URL, segment by segment."
+  [path]
+  (->> (str/split path #"/")
+       (map #(str/replace (java.net.URLEncoder/encode % "UTF-8") "+" "%20"))
+       (str/join "/")))
+
 (defn decode
   "The path of a URL back as text. A plus sign stays a plus sign."
   [encoded]

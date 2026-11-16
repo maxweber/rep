@@ -138,6 +138,10 @@
   (testing "the path of a request, cleaned"
     (is (= "in/clip one+two.txt" (files/requested {:uri "/file/in/clip%20one+two.txt"})))
     (is (= "b.txt" (files/requested {:uri "/file/a/../b.txt"}))))
+  (testing "a path a host wrote into a URL with encode comes back as it was"
+    (doseq [path ["in/clip one+two.txt" "in/ä ö/100%.txt" "a&b=c?d#e.txt"]]
+      (is (= path (files/requested {:uri (str "/file/" (files/encode path))})) path))
+    (is (= "in/clip%20one%2Btwo.txt" (files/encode "in/clip one+two.txt"))))
   (testing "nil for a path that leaves the work folder, points into .rep or is no path at all"
     (doseq [uri ["/file/" "/file/../x" "/file/%2E%2E/x" "/file/a/../../x" "/file//etc/passwd" "/file/%2Fetc%2Fpasswd"
                  "/file/.rep/sessions" "/file/a/../.rep" "/file/a%5Cb" "/file/%zz"]]
