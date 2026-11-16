@@ -5,6 +5,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http-server]
+            [rep.auth :as auth]
             [rep.image :as image]
             [rep.server :as server]
             [rep.server-test :as server-test :refer [evaluate outcome uuid with-system]]))
@@ -386,22 +387,26 @@
           (fn [w]
             (let [session (uuid)
                   done (uuid)
-                  failed (uuid)]
+                  failed (uuid)
+                  claims (auth/claims w server-test/token)]
               (evaluate w session "(+ 1 2)" {:id done})
               (evaluate w session "(/ 1 0)" {:id failed})
-              (testing "the hook hears about every evaluation of a POST, with its outcome"
+              (testing "the hook hears about every evaluation of a POST, with its outcome and the claims of its token"
+                (is (= "test" (get claims "sub")))
                 (is (wait-for 2000 #(= 2 (count @calls))))
                 (is (= #{{:evaluation/session session
                           :evaluation/id done
                           :evaluation/state :done
                           :evaluation/exit 0
                           :evaluation/code "(+ 1 2)"
+                          :evaluation/claims claims
                           :port (:rep/port w)}
                          {:evaluation/session session
                           :evaluation/id failed
                           :evaluation/state :failed
                           :evaluation/exit 1
                           :evaluation/code "(/ 1 0)"
+                          :evaluation/claims claims
                           :port (:rep/port w)}}
                        (set @calls))))
               (testing "an answer that is replayed ran nothing, so the hook hears nothing"
@@ -524,9 +529,9 @@
 
 (deftest rep-path-test
   (testing "the paths that belong to rep"
-    (is (every? server/rep-path? ["/rep/a/b" "/rep/" "/file/in/clip.mp4"])))
+    (is (every? server/rep-path? ["/rep" "/rep/a" "/rep/a/b" "/rep/" "/file/in/clip.mp4"])))
   (testing "everything else is the host's, the page at / too"
-    (is (not-any? server/rep-path? ["/" "" nil "/rep" "/file" "/login" "/logout" "/login/callback"
+    (is (not-any? server/rep-path? ["/" "" nil "/file" "/login" "/logout" "/login/callback"
                                     "/chat/1" "/repository" "/files/a" "/api/rep/a/b"]))))
 
 (deftest host-test

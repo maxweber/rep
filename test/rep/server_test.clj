@@ -338,15 +338,110 @@
             (is (= [(:body server/unauthorized)] (distinct (map :body refused))))
             (is (= ["Bearer"] (distinct (map #(get (:headers %) "www-authenticate") refused))))
             (is (not (fs/exists? (fs/file (:rep/dir w) "ran.txt"))) "and nothing ran")))
-        (is (= 400 (:status (http/post (address w "/rep/not-a-uuid/" (uuid))
-                                       {:headers authorized :body "1" :throw false}))))
+        (testing "a session and an id in the path are UUIDs"
+          (doseq [bad [(str "/rep/not-a-uuid/" (uuid)) (str "/rep/" (uuid) "/not-a-uuid") "/rep/not-a-uuid"
+                       (str "/rep//" (uuid))]]
+            (is (= 400 (:status (http/post (address w bad) {:headers authorized :body "1" :throw false}))) bad)))
         (is (= 400 (:status (http/post (address w path) {:headers authorized :body "" :throw false}))))
         (testing "POST is the only way in"
-          (is (= 405 (:status (http/get (address w path) {:headers authorized :throw false}))))
-          (is (= 405 (:status (http/delete (address w path) {:headers authorized :throw false})))))
-        (let [usage (http/get (address w "/") {:throw false})]
-          (is (= 200 (:status usage)))
-          (is (str/includes? (:body usage) "POST /rep/")))))))
+          (doseq [path [path "/rep" (str "/rep/" (uuid))]]
+            (is (= 405 (:status (http/get (address w path) {:headers authorized :throw false}))))
+            (is (= 405 (:status (http/delete (address w path) {:headers authorized :throw false}))))))
+        (testing "a path that is none of rep's is a 404, with or without a token"
+          (doseq [path [(str path "/more") "/repl" "/login" "/logout" "/file"]]
+            (is (= 404 (:status (http/post (address w path) {:headers authorized :body "1" :throw false}))) path)
+            (is (= 404 (:status (http/post (address w path) {:body "1" :throw false}))) path)))))))
+
+(defn ask
+  "One POST of `code` to `path` with `bearer` as the token."
+  [w path bearer code]
+  (http/post (address w path) {:headers {"Authorization" (str "Bearer " bearer)}
+                               :body code
+                               :throw false}))
+
+(deftest token-session-test
+  (with-system {}
+    (fn [w]
+      (let [max (sign {"sub" "max"})
+            run (sign {"sub" "run/7"})]
+        (testing "POST /rep: the session is the token's, so a definition is there in the next call"
+          (let [first-answer (ask w "/rep" max "(def a 20)")
+                second-answer (ask w "/rep" max "(* 2 a)")]
+            (is (= "#'user/a\n" (:body first-answer)))
+            (is (= {"rep-status" "done" "rep-exit" "0" "rep-session" "started" "rep-evaluation" "new"}
+                   (outcome first-answer)))
+            (is (= "40\n" (:body second-answer)))
+            (is (= "continued" (get (:headers second-answer) "rep-session")))))
+        (testing "a second token of the same sub is the same session"
+          (is (= "40\n" (:body (ask w "/rep" (sign {"sub" "max" "exp" (+ (auth/now) 60)}) "(* 2 a)")))))
+        (testing "a token with another sub is another session"
+          (let [answer (ask w "/rep" run "(* 2 a)")]
+            (is (str/includes? (:body answer) "Unable to resolve symbol: a"))
+            (is (= "started" (get (:headers answer) "rep-session")))))
+        (testing "sid goes before sub: two subs with one sid share a session, one sub with two sids does not"
+          (is (= "#'user/b\n" (:body (ask w "/rep" (sign {"sub" "max" "sid" "desk"}) "(def b 1)"))))
+          (is (= "1\n" (:body (ask w "/rep" (sign {"sub" "run/7" "sid" "desk"}) "b"))))
+          (is (str/includes? (:body (ask w "/rep" (sign {"sub" "max" "sid" "phone"}) "b")) "Unable to resolve symbol: b"))
+          (is (str/includes? (:body (ask w "/rep" max "b")) "Unable to resolve symbol: b")))
+        (testing "a sid that is a UUID is the session a path names with that UUID"
+          (let [session (uuid)]
+            (is (= "#'user/c\n" (:body (ask w "/rep" (sign {"sid" session}) "(def c 3)"))))
+            (is (= "3\n" (:body (ask w (str "/rep/" session) max "c"))))
+            (is (= "3\n" (:body (ask w (str "/rep/" session "/" (uuid)) run "c"))))))
+        (testing "the session of the token is the one rep.auth/session names"
+          (is (fs/exists? (fs/path (:rep/state-dir w) "sessions" (auth/session {"sub" "max"}))))
+          (is (= "40\n" (:body (ask w (str "/rep/" (auth/session {"sub" "max"})) run "(* 2 a)")))))
+        (testing "a token that names no session is told so, and is good for a session the path names"
+          (let [nameless (sign {})
+                answer (ask w "/rep" nameless "(+ 1 2)")]
+            (is (= 400 (:status answer)))
+            (is (str/includes? (:body answer) "neither the claim sid nor sub"))
+            (is (= "3\n" (:body (ask w (str "/rep/" (uuid)) nameless "(+ 1 2)"))))))))))
+
+(deftest optional-id-test
+  (with-system {}
+    (fn [w]
+      (let [session (uuid)
+            code "(spit \"count.txt\" \"x\" :append true) (slurp \"count.txt\")"]
+        (testing "without an id the server makes one: the same POST again is a new evaluation and runs again"
+          (let [first-answer (ask w (str "/rep/" session) token code)
+                second-answer (ask w (str "/rep/" session) token code)]
+            (is (= "\"x\"\n" (:body first-answer)))
+            (is (= "\"xx\"\n" (:body second-answer)))
+            (is (= ["new" "new"] (map #(get (:headers %) "rep-evaluation") [first-answer second-answer])))
+            (is (= ["started" "continued"] (map #(get (:headers %) "rep-session") [first-answer second-answer])))))
+        (testing "so does POST /rep"
+          (is (= "\"xxx\"\n" (:body (ask w "/rep" token code))))
+          (is (= "\"xxxx\"\n" (:body (ask w "/rep" token code)))))
+        (testing "each has a folder of its own, under an id that is a UUID"
+          (let [folders (fs/list-dir (fs/path (:rep/state-dir w) "sessions" session))]
+            (is (= 2 (count folders)))
+            (is (every? #(parse-uuid (fs/file-name %)) folders))))
+        (testing "with an id the same POST again answers the stored text and runs nothing, as before"
+          (let [id (uuid)
+                first-answer (ask w (str "/rep/" session "/" id) token code)
+                second-answer (ask w (str "/rep/" session "/" id) token code)]
+            (is (= "\"xxxxx\"\n" (:body first-answer) (:body second-answer)))
+            (is (= ["new" "replayed"] (map #(get (:headers %) "rep-evaluation") [first-answer second-answer])))
+            (is (= "xxxxx" (slurp (fs/file (:rep/dir w) "count.txt"))))))))))
+
+(deftest usage-test
+  (with-system {}
+    (fn [w]
+      (let [answer (http/get (address w "/") {:throw false})
+            lines (str/split-lines (:body answer))]
+        (testing "GET / explains rep to an agent, without a token"
+          (is (= 200 (:status answer)))
+          (is (str/includes? (:body answer) "POST /rep with Clojure code as the body")))
+        (testing "in under 40 lines, with the three curl commands"
+          (is (< (count lines) 40))
+          (is (= 3 (count (filter #(str/starts-with? % "  curl ") lines)))))
+        (testing "and nothing of a login is left in it"
+          (is (not (re-find #"(?i)login|logout|log in" (:body answer))))))))
+  (testing "it says the largest body of this server, and that an image is shared"
+    (is (str/includes? (server/usage {:rep/max-body (* 5 1024 1024)}) "One request carries 5 MB."))
+    (is (not (str/includes? (server/usage {}) "shared image")))
+    (is (str/includes? (server/usage {:rep/shared-image? true}) "one shared image"))))
 
 (deftest restart-test
   (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))

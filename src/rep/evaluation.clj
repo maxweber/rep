@@ -200,7 +200,7 @@
   "The whole life of an evaluation on its thread. At its end the hook
    `:rep/after-evaluation` hears about it, once the outcome is on record
    and everyone who follows has the answer."
-  [w {:evaluation/keys [session id output] :as evaluation} body]
+  [w {:evaluation/keys [session id output claims] :as evaluation} body]
   (let [outcome (try
                   (evaluate! w evaluation body)
                   (catch Throwable e
@@ -217,12 +217,13 @@
                                          :evaluation/id id
                                          :evaluation/state (:state outcome)
                                          :evaluation/exit (:exit outcome)
-                                         :evaluation/code body})))
+                                         :evaluation/code body
+                                         :evaluation/claims claims})))
 
 (defn- start!
   "Makes the evaluation's folder and record, and starts its thread."
   [{:rep/keys [evaluations output-limit] :as w}
-   {:request/keys [session id body]}]
+   {:request/keys [session id body claims]}]
   (let [state (session-state w session)
         dir (folder w session id)
         record {:state :running
@@ -234,6 +235,7 @@
         _ (reserve! w session)
         evaluation {:evaluation/session session
                     :evaluation/id id
+                    :evaluation/claims claims
                     :evaluation/record record
                     :evaluation/output (output/open (output-file w session id) output-limit)
                     :evaluation/done (promise)}]

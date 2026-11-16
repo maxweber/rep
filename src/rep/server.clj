@@ -1,7 +1,7 @@
 (ns rep.server
   "REP over HTTP: read, eval, print, and the loop stays with the caller.
 
-     POST /rep/<session>/<id>   evaluates the body, answers its output
+     POST /rep                  evaluates the body, answers its output
      PUT  /file/<path>          the body becomes a file of the work folder,
                                 with ?offset=<n> one part of a large file
      GET  /file/<path>          answers the file, a part of it with a
@@ -15,8 +15,18 @@
    process of its own. The answer is plain text: what the code printed
    and the value of its last form, with the output of bash as bash wrote
    it. The outcome travels in the headers Rep-Status and Rep-Exit, so the
-   text needs no frame around it. The same POST again runs nothing, it
-   answers the same text, from byte `?from=` on when asked.
+   text needs no frame around it.
+
+   The session is the token's: its claim `sid`, else `sub`, see
+   `rep.auth/session`. A caller that wants another one, or an id of its
+   own for an evaluation, names them in the path:
+
+     POST /rep/<session>        a session by its UUID
+     POST /rep/<session>/<id>   and an evaluation by its UUID
+
+   Without an id the server makes one. With one the same POST again
+   runs nothing, it answers the same text, from byte `?from=` on when
+   asked.
 
    With `:rep/shared-image?` all sessions evaluate in one babashka
    process that starts with the server, see `rep.image`."
@@ -43,32 +53,51 @@
    reaches the port can make the server hold per connection."
   (* 32 1024 1024))
 
-(def usage
-  "What a GET on / answers, for an agent that only knows the address."
+(defn usage
+  "What a GET on / answers, for an agent that only knows the address:
+   the protocol in under 40 lines, with the three curl commands."
+  [{:rep/keys [shared-image?] :as w}]
   (str/join
    "\n"
-   ["rep: read, eval, print. You keep the loop."
-    ""
-    "POST /rep/<session-uuid>/<evaluation-uuid>   body = Clojure code, answer = plain text"
-    ""
-    "Send the header Authorization: Bearer <token>, with the token you were given."
-    "Keep the token in a file or a variable and do not print it."
-    ""
-    "Pick one session uuid and keep it. A session is a babashka process, definitions stay in it."
-    "Use a new evaluation uuid for every new piece of code."
-    "The same uuid with the same code answers the same text again and runs nothing. Add ?from=<bytes> for the rest only."
-    "The headers Rep-Status (running, done, failed, interrupted) and Rep-Exit (0 or 1) tell the outcome."
-    "Long work: start it in a future, keep the result in an atom, ask in a later request."
-    "Start with the code (help)."
-    ""]))
-
-(def shared-usage
-  "What a GET on / adds when all sessions share one image."
-  (str/join
-   "\n"
-   ["This server runs one shared image. All session uuids evaluate in the same babashka process."
-    "Every caller sees a definition you make, and another caller can redefine it."
-    ""]))
+   (concat
+    ["rep: read, eval, print. You keep the loop."
+     ""
+     "POST /rep with Clojure code as the body. The answer is plain text: what the code"
+     "printed, then the value of its last form, or the error as babashka prints it."
+     "Every request carries your token in the header Authorization: Bearer <token>."
+     "Keep the token in a variable or a file and never print it."
+     ""
+     "  curl -s -H \"Authorization: Bearer $REP_TOKEN\" --data-binary @- \"$REP_URL/rep\" <<'EOF'"
+     "  (def greeting \"it's \\\"quoted\\\"\")"
+     "  (println greeting)"
+     "  (sh \"date\")"
+     "  EOF"
+     ""
+     "The code goes through the heredoc as you wrote it, quotes and line breaks included."
+     "Your token is one session, a babashka process: what you define stays for your next"
+     "request. (sh script) runs bash, and its output is in the answer. Start with (help)."
+     ""
+     "Files of the work folder, with the same header:"
+     ""
+     "  curl -s -H \"Authorization: Bearer $REP_TOKEN\" -T clip.mp4 \"$REP_URL/file/in/clip.mp4\""
+     "  curl -s -H \"Authorization: Bearer $REP_TOKEN\" -o final.mp4 \"$REP_URL/file/out/final.mp4\""
+     ""
+     (str "One request carries " (quot (or (:rep/max-body w) max-body) (* 1024 1024)) " MB. A larger file goes up in parts, each a PUT with")
+     "?offset=<bytes so far>, and comes down in parts with curl -r <from>-<to>, 8 MB each."
+     ""
+     "Long work: start it in a future, keep the result in an atom, ask in a later request."
+     "A request that takes longer than a second streams its output, and it runs on when the"
+     "connection drops. To send a POST again safely, give it two UUIDs of your own:"
+     "POST /rep/<session>/<id>. The same POST again runs nothing and answers the same text,"
+     "with ?from=<bytes you have> the rest of it. A session you name is not your token's:"
+     "what you defined through POST /rep is not in it. POST /rep/<session> works too."
+     "The headers Rep-Status (running, done, failed, interrupted) and Rep-Exit (0 or 1)"
+     "tell a program the outcome."]
+    (when shared-image?
+      [""
+       "This server runs one shared image: all sessions evaluate in the same babashka process."
+       "Every caller sees a definition you make, and another caller can redefine it."])
+    [""])))
 
 (defn- text
   ([status body]
@@ -165,13 +194,14 @@
 (defn- evaluate
   "Answers a POST. A new evaluation gets a moment to finish, so that a
    quick one answers with its outcome in the headers right away."
-  [{:rep/keys [grace-ms] :as w} request session id]
+  [{:rep/keys [grace-ms] :as w} request session id claims]
   (let [body (some-> (:body request) (.readAllBytes) (String. "UTF-8"))]
     (if (str/blank? body)
       (text 400 "The body is empty. Send the code to evaluate.\n")
       (let [submitted (evaluation/submit! w {:request/session session
                                              :request/id id
-                                             :request/body body})]
+                                             :request/body body
+                                             :request/claims claims})]
         (case (:submit/answer submitted)
           :conflict
           (text 409 (str "The evaluation id " id " was used for another request. "
@@ -187,22 +217,53 @@
                     {"Rep-Evaluation" "new"
                      "Rep-Session" (name (:submit/session submitted))})))))))
 
+(defn- rep
+  "Answers a request to `/rep`, `/rep/<session>` or
+   `/rep/<session>/<id>`. A path without a session means the session of
+   the token (`rep.auth/session`), and a path without an id gets a
+   fresh one, so that only a caller that chose its id can send the
+   same POST again."
+  [w {:keys [request-method] :as request} session id]
+  (let [claims (claims w request)
+        session (or session (auth/session claims))]
+    (cond
+      (not claims)
+      unauthorized
+
+      (not session)
+      (text 400 (str "This token names no session, it has neither the claim sid nor sub. "
+                     "POST to /rep/<session> with a UUID of your own.\n"))
+
+      (not (and (parse-uuid session) (or (nil? id) (parse-uuid id))))
+      (text 400 "The session and the evaluation id have to be UUIDs.\n")
+
+      (not= :post request-method)
+      (text 405 "POST the code. The same POST again answers the same text.\n")
+
+      :else
+      (evaluate w request session (or id (str (random-uuid))) claims))))
+
 (defn rep-path?
-  "True when the path `uri` of a request is one of rep's own:
-   everything below `/rep/` and `/file/`. A host that owns the HTTP
+  "True when the path `uri` of a request is one of rep's own: `/rep`
+   and everything below `/rep/` and `/file/`. A host that owns the HTTP
    server hands such a request to `handle` and answers every other one
    itself. `/` is not among them. `handle` answers it with the usage
    text, but a host has a page of its own there."
   [uri]
   (let [uri (str uri)]
-    (or (str/starts-with? uri "/rep/")
+    (or (= "/rep" uri)
+        (str/starts-with? uri "/rep/")
         (str/starts-with? uri "/file/"))))
 
 (defn handle
   "The ring handler. It takes the system `w` and a ring request and
    answers these paths, every other one with a 404:
 
-     POST /rep/<session>/<id>   evaluates the body, needs the bearer token
+     POST /rep                  evaluates the body in the session of the
+                                token, needs the bearer token
+     POST /rep/<session>        the same in the session of that UUID
+     POST /rep/<session>/<id>   and as the evaluation of that UUID, which
+                                the same POST again answers from
      PUT  /file/<path>          stores the body in the work folder, needs
                                 the bearer token
      GET  /file/<path>          answers the file, HEAD its length alone,
@@ -216,31 +277,26 @@
    `:query-string`, `:scheme` and `:body` as an input stream, the way
    http-kit hands them over. An evaluation that takes longer than
    `:rep/grace-ms` answers with an http-kit channel that streams, so the
-   host's server has to be http-kit for those."
-  [{:rep/keys [shared-image?] :as w} {:keys [request-method uri] :as request}]
+   host's server has to be http-kit for those.
+
+   A host that wants to know who calls before it hands a request over
+   asks `rep.auth/claims` with the system and the token: it answers all
+   claims of a token that is let in. The hook `:rep/after-evaluation`
+   gets them too."
+  [w {:keys [request-method uri] :as request}]
   (let [[root session id & more] (rest (str/split uri #"/"))]
     (cond
       (and (= "/" uri) (= :get request-method))
-      (text 200 (cond-> usage
-                  shared-image? (str shared-usage)))
+      (text 200 (usage w))
 
       (str/starts-with? uri "/file/")
       (file w request)
 
-      (not (and (= "rep" root) session id (not more)))
-      (text 404 "Not found. GET / tells how this works.\n")
-
-      (not (claims w request))
-      unauthorized
-
-      (not (and (parse-uuid session) (parse-uuid id)))
-      (text 400 "The session and the evaluation id have to be UUIDs.\n")
-
-      (not= :post request-method)
-      (text 405 "POST the code. The same POST again answers the same text.\n")
+      (and (= "rep" root) (not more))
+      (rep w request session id)
 
       :else
-      (evaluate w request session id))))
+      (text 404 "Not found. GET / tells how this works.\n"))))
 
 (defn prepare
   "The system map from the options, the environment and the defaults.
@@ -311,7 +367,9 @@
                           POST, with or without the shared image. `evaluation`
                           has :evaluation/session, :evaluation/id,
                           :evaluation/state (:done or :failed),
-                          :evaluation/exit and :evaluation/code"
+                          :evaluation/exit, :evaluation/code and
+                          :evaluation/claims, all claims of the token the
+                          POST came with"
   [options]
   (let [env (fn [variable]
               (not-empty (System/getenv variable)))
