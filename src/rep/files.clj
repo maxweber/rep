@@ -66,8 +66,8 @@
   "The file of `path` in the work folder `:rep/dir`. Throws for a path
    that `relative` refuses, and for one that resolves, through a link,
    to a place outside the work folder or inside rep's state folder.
-   The signed routes, a host's own file route (`serve`) and
-   `rep.prelude/file-size` all come through here."
+   The signed routes and a host's own file route (`serve`) come through
+   here."
   [{:rep/keys [dir] :as w} path]
   (let [clean (relative path)
         target (when clean (fs/path dir clean))]
@@ -484,7 +484,7 @@
           (and (< one-buffer-bytes length) (not (:door/request? request)))
           (text 400
                 (str path " holds " length " bytes. This server sends a file above 2 GB in parts only."
-                     " Fetch it with rep download " path " <local file>, or ask with a Range header.\n"))
+                     " Ask with a Range header, as curl -r does: each answer carries 8 MB at most.\n"))
 
           :else
           {:status 200

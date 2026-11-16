@@ -299,7 +299,7 @@
                       of every request, a job that usually belongs to a
                       proven server, so it is for whoever needs it. Without
                       it a plain GET sends a file up to 2 GB, a larger one
-                      comes in parts with `Range`, as `rep download` asks
+                      comes in parts with `Range`
    :rep/slice-bytes   how much of a file the door holds at a time while a
                       GET fetches it whole, one megabyte, see `rep.door`
    :rep/url-seconds   how long a signed URL holds

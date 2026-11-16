@@ -16,7 +16,6 @@
         :extra-paths ["test"]
         :requires ([clojure.test :as test])
         :task (let [namespaces '[rep.server-test
-                                 rep.client-test
                                  rep.files-test
                                  rep.door-test
                                  rep.image-test]]

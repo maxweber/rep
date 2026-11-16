@@ -267,8 +267,8 @@
         (is (= 400 (:status answer)))
         (is (str/includes? (:body answer) (str "out/large.bin holds " bytes " bytes")))
         (is (str/includes? (:body answer) "above 2 GB in parts only"))
-        (is (str/includes? (:body answer) "rep download out/large.bin"))
-        (is (str/includes? (:body answer) "Range header"))))
+        (is (str/includes? (:body answer) "Range header"))
+        (is (str/includes? (:body answer) "curl -r"))))
     (testing "a HEAD gets the status of that GET"
       (is (= 400 (:status (http/head url {:throw false})))))
     (testing "a Range gets its part, from the start and from behind the 2 GB"

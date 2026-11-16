@@ -3,11 +3,9 @@
    an upload and a download in parts, and the offsets of a part."
   (:require [babashka.fs :as fs]
             [babashka.http-client :as http]
-            [babashka.process :as process]
             [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [rep.client :as client]
             [rep.files :as files]
             [rep.server :as server]
             [rep.server-test :as server-test :refer [evaluate uuid with-system]]))
@@ -43,17 +41,15 @@
           (recur (- left megabyte)))))
     file))
 
-(defn- as-client
-  "The system as `rep.client` sees it, with a session of its own."
-  [w]
-  {:client/url (server-test/address w)
-   :client/token server-test/token
-   :client/session (uuid)})
-
 (defn- upload-url
   "A signed URL that takes `path`, asked for the way a caller does."
   [w path]
   (edn/read-string (:body (evaluate w (uuid) (str "(upload-url " (pr-str path) ")")))))
+
+(defn- download-url
+  "A signed URL that gives `path`, asked for the way a caller does."
+  [w path]
+  (edn/read-string (:body (evaluate w (uuid) (str "(download-url " (pr-str path) ")")))))
 
 (defn- put
   "PUTs `body` to the signed URL, as the part at `offset` when given."
@@ -65,6 +61,36 @@
 (defn- size-header
   [response]
   (get (:headers response) (str/lower-case files/size-header)))
+
+(defn- put-parts!
+  "Sends the file `local` to `url` in parts of `part-bytes`, each at the
+   offset the server said the file holds. Answers the bytes the file
+   holds at the end."
+  [url local part-bytes]
+  (with-open [in (java.io.RandomAccessFile. (str local) "r")]
+    (loop [offset 0]
+      (let [part (byte-array (min part-bytes (- (.length in) offset)))
+            _ (.seek in offset)
+            _ (.readFully in part)
+            held (parse-long (size-header (put url part offset)))]
+        (if (< held (.length in))
+          (recur held)
+          held)))))
+
+(defn- get-parts!
+  "Fetches the file behind `url` into the local file `back`, one range
+   after the other, each as long as the server makes it. Answers the
+   bytes that came."
+  [url back]
+  (with-open [out (java.io.FileOutputStream. (str back))]
+    (loop [offset 0]
+      (let [answer (http/get url {:headers {"Range" (str "bytes=" offset "-")} :as :bytes :throw false})
+            total (parse-long (second (re-find #"/(\d+)$" (get (:headers answer) "content-range"))))
+            end (+ offset (alength (:body answer)))]
+        (.write out ^bytes (:body answer))
+        (if (< end total)
+          (recur end)
+          end)))))
 
 (deftest links-test
   (with-system {}
@@ -99,11 +125,6 @@
         (testing "a link that leads nowhere is refused, a write through it would make a file where it points"
           (is (= 403 (:status (http/put (url-for "upload-url" "in/nowhere-link") {:body "x" :throw false}))))
           (is (not (fs/exists? (fs/path (:rep/state-dir w) "not-there-yet")))))
-        (testing "the session's own helper that goes through the same check refuses it too"
-          (let [answer (evaluate w session "(rep.prelude/file-size \"in/file-link\")")]
-            (is (= "failed" (get (:headers answer) "rep-status")))
-            (is (str/includes? (:body answer) "Not a path inside the work folder")))
-          (is (= "11\n" (:body (evaluate w session "(rep.prelude/file-size \"in/inside-link\")")))))
         (testing "a link that stays inside the work folder works as before"
           (is (= "a real file" (:body (http/get (url-for "download-url" "in/inside-link") {:throw false}))))
           (is (= 201 (:status (http/put (url-for "upload-url" "in/inside-link") {:body "written through" :throw false}))))
@@ -151,15 +172,15 @@
                              (catch java.io.IOException e e))]
                 (is (or (instance? java.io.IOException answer) (= 413 (:status answer))))
                 (is (not (fs/exists? (fs/file (:rep/dir w) "in" "whole.bin"))))))
-            (testing "20 MB go up in parts through one signed URL and arrive intact"
-              (is (= (* 20 megabyte) (client/upload! (as-client w) local "in/big.bin")))
+            (testing "20 MB go up in parts of 8 MB and arrive intact"
+              (is (= (* 20 megabyte) (put-parts! (upload-url w "in/big.bin") local (* 8 megabyte))))
               (is (= (* 20 megabyte) (fs/size stored)))
               (is (= (sha256 local) (sha256 stored))))
-            (testing "and come back in parts"
-              (is (= (* 20 megabyte) (client/download! (as-client w) "in/big.bin" back)))
+            (testing "and come back in parts, 8 MB a range"
+              (is (= (* 20 megabyte) (get-parts! (download-url w "in/big.bin") back)))
               (is (= (sha256 local) (sha256 back))))
             (testing "the same upload again starts the file over, it does not append"
-              (is (= (* 20 megabyte) (client/upload! (as-client w) local "in/big.bin")))
+              (is (= (* 20 megabyte) (put-parts! (upload-url w "in/big.bin") local (* 8 megabyte))))
               (is (= (sha256 local) (sha256 stored)))))))
       (finally
         (fs/delete-if-exists local)
@@ -370,178 +391,3 @@
             (is (= 1 (files/forget-uploads! (assoc w :rep/now-ms (minutes 56)))))
             (is (empty? (fs/list-dir (fs/path (:rep/state-dir w) "uploads"))))))))))
 
-(defn- slowly
-  "A stand-in for a function of the HTTP client that waits `ms` before
-   every call, as a slow line does, and notes the status of every
-   answer in the atom `seen`."
-  [request ms seen]
-  (fn [url options]
-    (Thread/sleep ms)
-    (let [answer (request url options)]
-      (swap! seen conj (:status answer))
-      answer)))
-
-(defn- cut-after
-  "A stand-in for a function of the HTTP client that lets `n` calls
-   through and breaks the connection of every later one."
-  [request n]
-  (let [calls (atom 0)]
-    (fn [url options]
-      (if (< n (swap! calls inc))
-        (throw (java.io.IOException. "The line is cut."))
-        (request url options)))))
-
-(deftest url-lifetime-test
-  (let [local (random-file! (* 2 megabyte) 15)
-        back (str local ".back")
-        put http/put
-        get http/get]
-    (try
-      (with-system {:rep/url-seconds 1}
-        (fn [w]
-          (let [stored (fs/file (:rep/dir w) "in" "slow.bin")]
-            (testing "an upload that takes longer than a signed URL holds asks for a fresh one and completes"
-              (let [seen (atom [])]
-                (with-redefs [client/part-bytes (* 256 1024)
-                              http/put (slowly put 350 seen)]
-                  (is (= (* 2 megabyte) (client/upload! (as-client w) local "in/slow.bin"))))
-                (is (some #{403} @seen) "the server refused a URL that had run out in the middle")
-                (is (= 8 (count (filter #{201} @seen))) "and no part went twice")
-                (is (= (sha256 local) (sha256 stored)))))
-            (testing "so does a download"
-              (let [seen (atom [])]
-                (with-redefs [client/part-bytes (* 256 1024)
-                              http/get (slowly get 350 seen)]
-                  (is (= (* 2 megabyte) (client/download! (as-client w) "in/slow.bin" back))))
-                (is (some #{403} @seen))
-                (is (= 8 (count (filter #{206} @seen))))
-                (is (= (sha256 local) (sha256 back))))))))
-      (finally
-        (fs/delete-if-exists local)
-        (fs/delete-if-exists back)))))
-
-(deftest resume-test
-  (let [local (random-file! (* 2 megabyte) 16)
-        back (str local ".back")
-        part (str back ".part")
-        put http/put
-        get http/get]
-    (try
-      (with-system {}
-        (fn [w]
-          (let [stored (fs/file (:rep/dir w) "in" "cut.bin")]
-            (testing "an upload that was cut leaves the parts that arrived"
-              (with-redefs [client/part-bytes (* 256 1024)
-                            client/part-tries 1
-                            http/put (cut-after put 3)]
-                (is (thrown-with-msg? clojure.lang.ExceptionInfo #"The server does not answer"
-                                      (client/upload! (as-client w) local "in/cut.bin"))))
-              (is (= (* 3 256 1024) (fs/size stored))))
-            (testing "another upload of the path is told that one writes the file already"
-              (is (= 409 (:status (put-as (upload-url w "in/cut.bin") "x" (* 3 256 1024) "another")))))
-            (testing "with :resume? it asks how much the server has and sends the rest only"
-              (let [seen (atom [])]
-                (with-redefs [client/part-bytes (* 256 1024)
-                              http/put (slowly put 0 seen)]
-                  (is (= (* 2 megabyte) (client/upload! (as-client w) local "in/cut.bin" {:resume? true}))))
-                (is (= (repeat 5 201) @seen) "five parts were left of eight"))
-              (is (= (sha256 local) (sha256 stored))))
-            (testing "a resume of a file that is all there sends nothing"
-              (with-redefs [http/put (fn [& _] (throw (ex-info "Nothing should be sent." {})))]
-                (is (= (* 2 megabyte) (client/upload! (as-client w) local "in/cut.bin" {:resume? true})))))
-            (testing "a resume refuses a file that is longer on the server than here"
-              (spit stored "x" :append true)
-              (is (thrown-with-msg? clojure.lang.ExceptionInfo #"That is another file"
-                                    (client/upload! (as-client w) local "in/cut.bin" {:resume? true})))
-              (client/upload! (as-client w) local "in/cut.bin"))
-            (testing "a download that was cut leaves the part file with what came, and no half file"
-              (with-redefs [client/part-bytes (* 256 1024)
-                            client/part-tries 1
-                            http/get (cut-after get 3)]
-                (is (thrown-with-msg? clojure.lang.ExceptionInfo #"The server does not answer"
-                                      (client/download! (as-client w) "in/cut.bin" back))))
-              (is (= (* 3 256 1024) (fs/size part)))
-              (is (not (fs/exists? back))))
-            (testing "with :resume? it goes on from the part file's size"
-              (let [seen (atom [])]
-                (with-redefs [client/part-bytes (* 256 1024)
-                              http/get (slowly get 0 seen)]
-                  (is (= (* 2 megabyte) (client/download! (as-client w) "in/cut.bin" back {:resume? true}))))
-                (is (= (repeat 5 206) @seen)))
-              (is (= (sha256 local) (sha256 back)))
-              (is (not (fs/exists? part))))
-            (testing "without a part file a resume takes the local file for what came so far"
-              (with-open [out (java.io.FileOutputStream. back)]
-                (.write out (fs/read-all-bytes local) 0 megabyte))
-              (is (= (* 2 megabyte) (client/download! (as-client w) "in/cut.bin" back {:resume? true})))
-              (is (= (sha256 local) (sha256 back))))
-            (testing "a download without :resume? starts over"
-              (spit part "left over from another file")
-              (is (= (* 2 megabyte) (client/download! (as-client w) "in/cut.bin" back)))
-              (is (= (sha256 local) (sha256 back)))))))
-      (finally
-        (run! fs/delete-if-exists [local back part])))))
-
-(deftest command-test
-  (let [local (random-file! (* 3 megabyte) 7)
-        back (str local ".back")
-        script (str (fs/absolutize (fs/path "bin" "rep")))]
-    (try
-      (with-system {}
-        (fn [w]
-          (let [rep (fn [& args]
-                      (-> (apply process/shell
-                                 {:in ""
-                                  :out :string
-                                  :err :string
-                                  :continue true
-                                  :dir (:rep/dir w)
-                                  :extra-env {"REP_URL" (server-test/address w)
-                                              "REP_TOKEN" server-test/token}}
-                                 script args)
-                          (select-keys [:exit :out :err])))]
-            (testing "rep upload LOCAL PATH"
-              (is (= {:exit 0 :out (str "Stored in/clip.bin (" (* 3 megabyte) " bytes).\n") :err ""}
-                     (rep "upload" local "in/clip.bin")))
-              (is (= (sha256 local) (sha256 (fs/file (:rep/dir w) "in" "clip.bin")))))
-            (testing "rep download PATH LOCAL"
-              (is (= {:exit 0 :out (str "Fetched in/clip.bin into " back " (" (* 3 megabyte) " bytes).\n") :err ""}
-                     (rep "download" "in/clip.bin" back)))
-              (is (= (sha256 local) (sha256 back))))
-            (testing "what does not work ends with 1 and a sentence"
-              (let [{:keys [exit err]} (rep "download" "in/nothing.bin" back)]
-                (is (= 1 exit))
-                (is (str/includes? err "No file in/nothing.bin")))
-              (let [{:keys [exit err]} (rep "upload" (str local ".missing") "in/x.bin")]
-                (is (= 1 exit))
-                (is (str/includes? err "There is no file")))
-              (let [{:keys [exit err]} (rep "upload" local "../outside.bin")]
-                (is (= 1 exit))
-                (is (str/includes? err "The session gave no URL"))))
-            (testing "a command without its two arguments says how it goes"
-              (is (= 2 (:exit (rep "upload" local)))))
-            (testing "rep upload --resume goes on with a file of which the server has the beginning"
-              (let [stored (fs/file (:rep/dir w) "in" "resumed.bin")]
-                (fs/create-dirs (fs/parent stored))
-                (with-open [out (java.io.FileOutputStream. stored)]
-                  (.write out (fs/read-all-bytes local) 0 megabyte))
-                (is (= {:exit 0 :out (str "Stored in/resumed.bin (" (* 3 megabyte) " bytes).\n") :err ""}
-                       (rep "upload" "--resume" local "in/resumed.bin")))
-                (is (= (sha256 local) (sha256 stored)))))
-            (testing "rep download --resume goes on with a local file that has the beginning"
-              (with-open [out (java.io.FileOutputStream. back)]
-                (.write out (fs/read-all-bytes local) 0 megabyte))
-              (is (= 0 (:exit (rep "download" "--resume" "in/clip.bin" back))))
-              (is (= (sha256 local) (sha256 back))))
-            (testing "a download that fails at its first byte leaves no part file"
-              (rep "download" "in/nothing.bin" back)
-              (is (not (fs/exists? (str back ".part")))))
-            (testing "an empty file goes both ways"
-              (spit local "")
-              (is (= 0 (:exit (rep "upload" local "in/empty.bin"))))
-              (is (= 0 (fs/size (fs/file (:rep/dir w) "in" "empty.bin"))))
-              (is (= 0 (:exit (rep "download" "in/empty.bin" back))))
-              (is (= 0 (fs/size back)))))))
-      (finally
-        (fs/delete-if-exists local)
-        (fs/delete-if-exists back)))))

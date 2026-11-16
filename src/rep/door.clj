@@ -7,8 +7,7 @@
    It is off by default. The door is an HTTP listener of our own in
    front of every request on the public port, and that job usually
    belongs to a proven server. Without the door a plain GET sends a
-   file up to 2 GB, and a larger one comes in parts with `Range`, which
-   `rep download` does.
+   file up to 2 GB, and a larger one comes in parts with `Range`.
 
    http-kit cannot send a larger file in one answer, which the source
    says and a probe confirmed (babashka 1.13, http-kit 2.9):
