@@ -201,7 +201,7 @@
 
 (deftest server-restart-test
   (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-        options {:rep/dir folder :rep/port 0 :rep/token server-test/token :rep/shared-image? true}
+        options (assoc server-test/access :rep/dir folder :rep/port 0 :rep/shared-image? true)
         session (uuid)
         before (server/start! (server/prepare options))]
     (try
@@ -458,10 +458,7 @@
 (deftest stop-test
   (testing "stop! ends the supervision and the image, and no babashka is left"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-          w (server/start! (server/prepare {:rep/dir folder
-                                            :rep/port 0
-                                            :rep/token server-test/token
-                                            :rep/shared-image? true}))]
+          w (server/start! (server/prepare (assoc server-test/access :rep/dir folder :rep/port 0 :rep/shared-image? true)))]
       (try
         (let [first-pid (:image/pid (image/status w))
               _ (evaluate w (uuid) "(System/exit 0)")
@@ -480,7 +477,7 @@
           (fs/delete-tree folder)))))
   (testing "also when it comes while the image starts"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-          w (server/prepare {:rep/dir folder :rep/token server-test/token :rep/shared-image? true})
+          w (server/prepare (assoc server-test/access :rep/dir folder :rep/shared-image? true))
           starting (future (image/start! w))]
       (try
         (is (wait-for 2000 #(:image/stop @(:rep/image w))))
@@ -494,10 +491,7 @@
   (testing "and when the prelude never comes back, so the start hangs"
     (let [prelude (prelude-file "@(promise)\n")
           folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-          w (server/prepare {:rep/dir folder
-                             :rep/token server-test/token
-                             :rep/shared-image? true
-                             :rep/prelude prelude})
+          w (server/prepare (assoc server-test/access :rep/dir folder :rep/shared-image? true :rep/prelude prelude))
           starting (future (image/start! w))]
       (try
         (is (wait-for 2000 #(:image/starting @(:rep/image w))))
@@ -530,17 +524,15 @@
 
 (deftest rep-path-test
   (testing "the paths that belong to rep"
-    (is (every? server/rep-path? ["/rep/a/b" "/rep/" "/file/in/clip.mp4" "/login" "/logout"])))
+    (is (every? server/rep-path? ["/rep/a/b" "/rep/" "/file/in/clip.mp4"])))
   (testing "everything else is the host's, the page at / too"
-    (is (not-any? server/rep-path? ["/" "" nil "/rep" "/file" "/login/callback" "/logouts"
+    (is (not-any? server/rep-path? ["/" "" nil "/rep" "/file" "/login" "/logout" "/login/callback"
                                     "/chat/1" "/repository" "/files/a" "/api/rep/a/b"]))))
 
 (deftest host-test
   (testing "a host with an HTTP server of its own mounts the handler and starts the image itself"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-          system (image/start! (server/prepare {:rep/dir folder
-                                                :rep/token server-test/token
-                                                :rep/shared-image? true}))
+          system (image/start! (server/prepare (assoc server-test/access :rep/dir folder :rep/shared-image? true)))
           host (http-server/run-server (fn [request]
                                          (if (server/rep-path? (:uri request))
                                            (server/handle system request)
@@ -552,9 +544,8 @@
         (testing "the host answers its own paths"
           (is (= "the host's page at /" (:body (http/get (server-test/address w "/")))))
           (is (= "the host's page at /chat/1" (:body (http/get (server-test/address w "/chat/1"))))))
-        (testing "rep answers the rest: evaluations, the login, files"
+        (testing "rep answers the rest: evaluations and files"
           (is (= "3\n" (:body (evaluate w (uuid) "(+ 1 2)"))))
-          (is (= 405 (:status (http/get (server-test/address w "/login") {:throw false}))))
           (is (= 401 (:status (http/put (server-test/file-address w "in/a.txt") {:body "text" :throw false}))))
           (is (= 201 (:status (http/put (server-test/file-address w "in/a.txt")
                                         {:headers server-test/authorized :body "text" :throw false}))))

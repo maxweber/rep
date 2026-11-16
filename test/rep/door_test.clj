@@ -287,7 +287,7 @@
   (testing "the door is off unless asked for"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))]
       (try
-        (is (false? (:rep/door? (server/prepare {:rep/dir folder :rep/token server-test/token}))))
+        (is (false? (:rep/door? (server/prepare (assoc server-test/access :rep/dir folder)))))
         (finally
           (fs/delete-tree folder))))
     (is (= {:rep/door? true} (server/cli-options ["--door"])))
@@ -312,7 +312,7 @@
 (deftest host-without-the-door-test
   (testing "a host that mounts the handler in its own http-kit answers the same"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-          system (server/prepare {:rep/dir folder :rep/token server-test/token})
+          system (server/prepare (assoc server-test/access :rep/dir folder))
           host (http-server/run-server (fn [request] (server/handle system request))
                                        {:port 0 :ip "127.0.0.1" :legacy-return-value? false})
           [first-part _] (sparse-file! (fs/file folder "out" "large.bin") (* 2500 megabyte))

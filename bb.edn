@@ -1,21 +1,13 @@
 {:paths ["src"]
  :tasks
- {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--class-path a,b] [--shared-image] [--max-body-mb 32] [--door]"
+ {serve {:doc "Starts the server: bb serve --port 8730 --dir work [--class-path a,b] [--shared-image] [--max-body-mb 32] [--door]. REP_PUBLIC_KEYS and REP_AUDIENCE say whose tokens it takes. Without a key it prints one token for a try on a laptop."
          :requires ([rep.server])
          :task (apply rep.server/-main *command-line-args*)}
-  code {:doc "Makes a login code: bb code [--dir work]"
-        :requires ([rep.admin])
-        :task (apply rep.admin/code *command-line-args*)}
-  tokens {:doc "Lists the tokens that are still good: bb tokens [--dir work]"
-          :requires ([rep.admin])
-          :task (apply rep.admin/tokens *command-line-args*)}
-  revoke {:doc "Ends a token: bb revoke <jti> [--dir work]"
-          :requires ([rep.admin])
-          :task (apply rep.admin/revoke *command-line-args*)}
   test {:doc "Runs the tests"
         :extra-paths ["test"]
         :requires ([clojure.test :as test])
-        :task (let [namespaces '[rep.server-test
+        :task (let [namespaces '[rep.auth-test
+                                 rep.server-test
                                  rep.files-test
                                  rep.door-test
                                  rep.image-test]]

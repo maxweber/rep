@@ -272,13 +272,13 @@
    after a credential of its own. The path gets the checks of `file`.
 
    Without `offset` in the query the body becomes the file, and a path
-   that `file` refuses is a 403. With `?offset=<n>` the body is one part of the file, for a
-   file that is too large for one request: offset 0 starts the file
-   over, the file's own size appends, and any other offset is a 409
-   that changes nothing. Every answer to a part that was stored or that
-   came at the wrong offset says how many bytes the file holds, in its
-   text and in the header `Rep-File-Size`, so a caller that lost an
-   answer knows where to go on.
+   that `file` refuses is a 403. With `?offset=<n>` the body is one
+   part of the file, for a file that is too large for one request:
+   offset 0 starts the file over, the file's own size appends, and any
+   other offset is a 409 that changes nothing. Every answer to a part
+   that was stored or that came at the wrong offset says how many bytes
+   the file holds, in its text and in the header `Rep-File-Size`, so a
+   caller that lost an answer knows where to go on.
 
    A file grows to `:rep/max-file-mb` megabytes at most. A part that
    would pass that is a 413.

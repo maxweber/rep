@@ -5,21 +5,48 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http-server]
-            [rep.admin :as admin]
             [rep.auth :as auth]
             [rep.evaluation :as evaluation]
             [rep.server :as server]
-            [rep.session :as session]))
+            [rep.session :as session]
+            [rep.token :as token]))
 
-(def token "test-token")
+(def audience
+  "The name of the servers of these tests, which a token's `aud` holds."
+  "rep-test")
+
+(defonce ^{:doc "The key pair of this test run. The tests are the issuer
+  of their own tokens, as a host is of its machine's."}
+  pair
+  (token/key-pair))
+
+(def public-keys
+  "The public key the servers of these tests verify against."
+  (:token/public-key pair))
+
+(defn sign
+  "A token for the servers of these tests with `claims`, good for an
+   hour unless they say otherwise."
+  [claims]
+  (token/sign (merge {"aud" audience "exp" (+ (auth/now) 3600)} claims)
+              (:token/private-key pair)))
+
+(def token
+  "The token the requests of these tests carry."
+  (sign {"sub" "test"}))
+
+(def access
+  "What a server of these tests needs to let that token in."
+  {:rep/public-keys public-keys
+   :rep/audience audience})
 
 (defn with-system
   "Runs `f` with a started system in a folder of its own."
   [options f]
   (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-        w (server/start! (server/prepare (merge {:rep/dir folder
-                                                 :rep/port 0
-                                                 :rep/token token}
+        w (server/start! (server/prepare (merge access
+                                                {:rep/dir folder
+                                                 :rep/port 0}
                                                 options)))]
     (try
       (f w)
@@ -120,9 +147,12 @@
                                               "(spit \"notes/a.txt\" \"x\")"
                                               "(slurp \"notes/a.txt\")")))))
         (is (= "x" (slurp (fs/file (:rep/dir w) "notes" "a.txt")))))
-      (testing "it does not get the server's token"
+      (testing "it does not inherit a caller's token from the shell the server was started in"
         (is (= {"PATH" "/bin"}
-               (session/environment {"PATH" "/bin" "REP_TOKEN" "t" "REP_SECRET" "s"})))))))
+               (session/environment {"PATH" "/bin" "REP_TOKEN" "t"})))
+        (is (= "nil\n" (:body (evaluate w (uuid) "(prn (System/getenv \"REP_TOKEN\"))"))))
+        (is (= "{}\n" (:body (evaluate w (uuid) "(dissoc @rep.prelude/config :parent)")))
+            "and the server tells it nothing but its own process id")))))
 
 (deftest error-test
   (with-system {}
@@ -292,6 +322,22 @@
         (is (= 401 (:status (http/post (address w path) {:headers {"Authorization" "Bearer wrong"}
                                                          :body "1"
                                                          :throw false}))))
+        (testing "every refusal is the same answer, whatever is wrong with the token"
+          (let [other (token/key-pair)
+                refused (for [bearer [nil
+                                      "wrong"
+                                      (sign {"sub" "test" "exp" (- (auth/now) 1)})
+                                      (sign {"sub" "test" "aud" "another-machine"})
+                                      (sign {"sub" "test" "nbf" (+ (auth/now) 600)})
+                                      (token/sign {"aud" audience "sub" "test" "exp" (+ (auth/now) 3600)}
+                                                  (:token/private-key other))
+                                      (str token "x")]]
+                          (http/post (address w path) (cond-> {:body "(spit \"ran.txt\" \"x\")" :throw false}
+                                                        bearer (assoc :headers {"Authorization" (str "Bearer " bearer)}))))]
+            (is (= [401] (distinct (map :status refused))))
+            (is (= [(:body server/unauthorized)] (distinct (map :body refused))))
+            (is (= ["Bearer"] (distinct (map #(get (:headers %) "www-authenticate") refused))))
+            (is (not (fs/exists? (fs/file (:rep/dir w) "ran.txt"))) "and nothing ran")))
         (is (= 400 (:status (http/post (address w "/rep/not-a-uuid/" (uuid))
                                        {:headers authorized :body "1" :throw false}))))
         (is (= 400 (:status (http/post (address w path) {:headers authorized :body "" :throw false}))))
@@ -304,7 +350,7 @@
 
 (deftest restart-test
   (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-        options {:rep/dir folder :rep/port 0 :rep/token token}
+        options (assoc access :rep/dir folder :rep/port 0)
         session (uuid)
         finished (uuid)
         cut-off (uuid)
@@ -429,7 +475,7 @@
           (is (fs/exists? (folder old)))))))
   (testing "the server sweeps when it starts"
     (let [folder (str (fs/create-temp-dir {:prefix "rep-test"}))
-          options {:rep/dir folder :rep/port 0 :rep/token token}
+          options (assoc access :rep/dir folder :rep/port 0)
           session (uuid)
           old (uuid)
           fresh (uuid)
@@ -504,102 +550,3 @@
               (is (empty? @session/children) "the process that hung is gone")))))
       (finally
         (fs/delete prelude)))))
-
-(defn login
-  "POSTs a login code. The answer's body is the token when it worked."
-  [w code]
-  (http/post (address w "/login") {:body code :throw false}))
-
-(defn with-bearer
-  "POSTs `code` with `bearer` as the token."
-  [w bearer code]
-  (http/post (address w "/rep/" (uuid) "/" (uuid))
-             {:headers {"Authorization" (str "Bearer " bearer)}
-              :body code
-              :throw false}))
-
-(deftest login-test
-  (with-system {:rep/token nil}
-    (fn [w]
-      (let [code (auth/mint-code! w)]
-        (is (re-matches #"[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}" code))
-        (testing "a GET does not burn the code, a link preview may do one"
-          (is (= 405 (:status (http/get (address w "/login") {:throw false})))))
-        (let [answer (login w code)
-              token (:body answer)]
-          (testing "the code is exchanged for a token"
-            (is (= 200 (:status answer)))
-            (is (= 3 (count (str/split token #"\."))))
-            (is (= "3\n" (:body (with-bearer w token "(+ 1 2)")))))
-          (testing "once"
-            (let [again (login w code)]
-              (is (= 401 (:status again)))
-              (is (str/includes? (:body again) "unknown, used or expired"))))
-          (testing "a token that was changed is refused"
-            (let [[header payload signature] (str/split token #"\.")
-                  forged (-> (String. (.decode (java.util.Base64/getUrlDecoder) payload) "UTF-8")
-                             (str/replace "\"iss\":\"rep\"" "\"iss\":\"rep\",\"x\":1")
-                             (.getBytes "UTF-8"))
-                  forged (.encodeToString (.withoutPadding (java.util.Base64/getUrlEncoder)) forged)]
-              (is (= 401 (:status (with-bearer w (str header "." forged "." signature) "1"))))
-              (is (= 401 (:status (with-bearer w (str header "." payload "." (str/reverse signature)) "1"))))
-              (is (= 401 (:status (with-bearer w "not-a-token" "1"))))))
-          (testing "the tokens are on record, and one without its record is refused"
-            (let [[record] (auth/tokens w)]
-              (is (= 1 (count (auth/tokens w))))
-              (is (true? (auth/revoke! w (:jti record))))
-              (is (= 401 (:status (with-bearer w token "1"))))
-              (is (empty? (auth/tokens w)))))))
-      (testing "a code as a person types it: lower case, no dashes"
-        (let [code (auth/mint-code! w)]
-          (is (= 200 (:status (login w (str/lower-case (str/replace code "-" ""))))))))
-      (testing "an unknown code and an empty one"
-        (is (= 401 (:status (login w "AAAA-BBBB-CCCC"))))
-        (is (= 401 (:status (login w ""))))))))
-
-(deftest logout-test
-  (with-system {:rep/token nil}
-    (fn [w]
-      (let [token (:body (login w (auth/mint-code! w)))
-            logout (fn [bearer]
-                     (http/post (address w "/logout")
-                                {:headers {"Authorization" (str "Bearer " bearer)}
-                                 :throw false}))]
-        (is (= 200 (:status (with-bearer w token "1"))))
-        (is (= 200 (:status (logout token))))
-        (is (= 401 (:status (with-bearer w token "1"))))
-        (is (= 401 (:status (logout token))))))))
-
-(deftest expiry-test
-  (testing "a code that is too old"
-    (with-system {:rep/token nil :rep/code-minutes -1}
-      (fn [w]
-        (is (= 401 (:status (login w (auth/mint-code! w))))))))
-  (testing "a token that is too old"
-    (with-system {:rep/token nil :rep/token-days -1}
-      (fn [w]
-        (let [answer (login w (auth/mint-code! w))]
-          (is (= 200 (:status answer)))
-          (is (= 401 (:status (with-bearer w (:body answer) "1")))))))))
-
-(deftest static-token-test
-  (with-system {}
-    (fn [w]
-      (testing "a configured token still works as a bearer"
-        (is (= "3\n" (:body (with-bearer w token "(+ 1 2)")))))
-      (testing "and a login code works next to it, made from a terminal while the server runs"
-        (let [code (str/trim (with-out-str
-                               (binding [*err* (java.io.StringWriter.)]
-                                 (admin/code "--dir" (:rep/dir w)))))
-              answer (login w code)]
-          (is (= 200 (:status answer)))
-          (is (= "3\n" (:body (with-bearer w (:body answer) "(+ 1 2)")))))))))
-
-(deftest session-keys-test
-  (with-system {}
-    (fn [w]
-      (testing "a session gets neither the key that signs tokens nor a token"
-        (is (= (pr-str [nil nil])
-               (str/trim (:body (evaluate w (uuid) "[(System/getenv \"REP_TOKEN\") (System/getenv \"REP_SECRET\")]")))))
-        (is (not (str/includes? (:body (evaluate w (uuid) "(pr-str @rep.prelude/config)"))
-                                (:rep/secret w))))))))

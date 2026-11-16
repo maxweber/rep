@@ -436,7 +436,6 @@
   (require '[rep.server :as server])
   (def w (server/start! (server/prepare {:rep/dir "work"
                                          :rep/port 8730
-                                         :rep/token "dev"
                                          :rep/shared-image? true
                                          :rep/on-image-start (fn [_w image] (prn :started image))})))
   (status w)

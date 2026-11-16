@@ -1,192 +1,231 @@
 (ns rep.auth
-  "Who may call. A secret that passes through a chat should be worth
-   little, so the server hands out a login code that works once and for a
-   few minutes. The caller exchanges it for a token, a JWT, and keeps
-   that itself. The server keeps a record per token, and a token without
-   its record is refused, which is how one is revoked.
+  "Who may call: one check. A request carries a bearer token, a JWT
+   signed with Ed25519, and `check` verifies it against the public keys
+   the server was configured with. That is all rep does about who
+   calls. It signs nothing, keeps nothing on disk for it and holds no
+   secret: whoever runs the machine hands out the tokens, see
+   `rep.token` for a host on babashka.
 
-   On disk, in the state folder:
+   What `check` looks at, in this order. The first that fails refuses
+   the token, and its keyword is the reason:
 
-     secret          the key that signs the tokens, made on first start
-     codes/<sha256>  one file per open login code, holding when it expires
-     tokens/<jti>    one file per token that is still good"
-  (:require [babashka.fs :as fs]
-            [cheshire.core :as json]
-            [clojure.edn :as edn]
-            [clojure.string :as str]
-            [rep.files :as files]))
+     :no-token       there is none
+     :no-keys        the server has no public key
+     :too-long       above `max-token-chars`, refused before it is parsed
+     :malformed      not three parts, a part that is not base64url
+                     without padding, a header that is no JSON object
+     :algorithm      the header's `alg` is not exactly `EdDSA`
+     :critical       the header has `crit`, and rep knows no extension
+     :signature      none of the server's keys verifies the signature
+     :claims         the payload is no JSON object
+     :no-exp         no `exp`, or one that is no number
+     :expired        `exp` does not lie ahead
+     :not-yet-valid  `nbf` is there and does not lie behind
+     :no-audience    no `aud`
+     :audience       `aud` is not the server's `:rep/audience` and no
+                     array that has it
 
-(def alphabet
-  "Crockford's base32: no I, L, O or U, so a code survives being read aloud."
-  "0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+   Of the header only `alg` and `crit` are read. `kid`, `jwk`, `jku`,
+   `x5u` and `x5c` choose nothing: a key never comes from a token. The
+   payload is read after the signature holds, never before.
+
+   There is no revocation. A token is good until its `exp`. The issuer
+   has two answers to a token that got out: short lifetimes, and a new
+   key pair, which ends every token at once."
+  (:require [cheshire.core :as json]
+            [clojure.string :as str]))
+
+(def max-token-chars
+  "The longest token `check` reads. A token with a handful of claims has
+   some 300 characters."
+  4096)
+
+(def reasons
+  "Each reason of `check` in words, for the server's own log. Nothing
+   in them comes from the request."
+  {:no-token "it carries no bearer token"
+   :no-keys "this server has no public key (:rep/public-keys) and lets nobody in"
+   :too-long "its token is too long to be read"
+   :malformed "its token is no JWT of three base64url parts"
+   :algorithm "its token's alg is not EdDSA"
+   :critical "its token's header has crit"
+   :signature "none of the public keys verifies its token's signature"
+   :claims "its token's payload is no JSON object"
+   :no-exp "its token has no exp"
+   :expired "its token has expired"
+   :not-yet-valid "its token's nbf lies ahead"
+   :no-audience "its token has no aud"
+   :audience "its token's aud is not this server's audience"})
 
 (defn now
-  "The current time in seconds."
+  "The current time in epoch seconds. A test holds the clock here."
   []
   (quot (System/currentTimeMillis) 1000))
 
-(defn- random-hex
-  [length]
-  (let [data (byte-array length)]
-    (.nextBytes (java.security.SecureRandom.) data)
-    (apply str (map #(format "%02x" %) data))))
+(def ^:private pem
+  "A public key as a PEM file has it."
+  #"(?s)-----BEGIN PUBLIC KEY-----(.*?)-----END PUBLIC KEY-----")
 
-(defn- sha256
+(defn- written
+  "The keys that `text` holds, each as the base64 of its
+   SubjectPublicKeyInfo: what stands in a PEM file, and every other run
+   of characters between commas, blanks and line breaks."
   [text]
-  (->> (.digest (java.security.MessageDigest/getInstance "SHA-256")
-                (.getBytes (str text) "UTF-8"))
-       (map #(format "%02x" %))
-       (apply str)))
+  (let [text (str/replace (str text) "\\n" "\n")]
+    (concat (map #(str/replace (second %) #"\s+" "") (re-seq pem text))
+            (remove str/blank? (str/split (str/replace text pem " ") #"[\s,]+")))))
 
-(defn- same?
-  "Compares two strings in constant time."
-  [a b]
-  (java.security.MessageDigest/isEqual (.getBytes (str a) "UTF-8")
-                                       (.getBytes (str b) "UTF-8")))
+(defn- public-key
+  "The Ed25519 public key that `base64` writes."
+  [base64]
+  (try
+    (.generatePublic (java.security.KeyFactory/getInstance "Ed25519")
+                     (java.security.spec.X509EncodedKeySpec. (.decode (java.util.Base64/getDecoder) (str base64))))
+    (catch Exception _
+      (throw (ex-info (str "Not an Ed25519 public key: " (pr-str base64) ". Give the base64 of its "
+                           "SubjectPublicKeyInfo, 60 characters that start with MCowBQYDK2VwAyEA, "
+                           "or the PEM file around it.")
+                      {:rep/error :public-key})))))
 
-(defn secret!
-  "The key that signs the tokens: the file `secret` in the state folder,
-   made on first use and readable by its owner only. It has to outlive a
-   restart, else every token would die with the server."
-  [state-dir]
-  (let [file (fs/path state-dir "secret")]
-    (when-not (fs/exists? file)
-      (fs/create-dirs state-dir)
-      (spit (fs/file file) (random-hex 32))
-      (fs/set-posix-file-permissions file "rw-------"))
-    (str/trim (slurp (fs/file file)))))
+(defn public-keys
+  "The Ed25519 public keys that `given` writes, as a vector of keys for
+   `check`. `given` is a text or several of them. A key is written as
 
-(defn new-code
-  "A fresh login code, 60 random bits as three groups of four characters."
-  []
-  (let [random (java.security.SecureRandom.)]
-    (->> (repeatedly 12 #(nth alphabet (.nextInt random 32)))
-         (partition 4)
-         (map #(apply str %))
-         (str/join "-"))))
+   - the base64 of its X.509 SubjectPublicKeyInfo: 60 characters that
+     start with `MCowBQYDK2VwAyEA`, the one line in the middle of a
+     PEM file, or
+   - that PEM file itself, `-----BEGIN PUBLIC KEY-----` and the lines
+     after it, as `openssl pkey -pubout` prints it.
 
-(defn normalize
-  "A code as typed or pasted, brought to the form it was made in: upper
-   case, no dashes or blanks, and the letters that look like digits read
-   as those digits."
-  [text]
-  (-> (str/upper-case (str text))
-      (str/replace #"[^0-9A-Z]" "")
-      (str/replace "O" "0")
-      (str/replace #"[IL]" "1")))
-
-(defn- code-file
-  [{:rep/keys [state-dir]} code]
-  (fs/path state-dir "codes" (sha256 (normalize code))))
-
-(defn mint-code!
-  "Makes a login code that holds for `:rep/code-minutes` and answers it.
-   Only its SHA-256 is kept."
-  [{:rep/keys [code-minutes] :as w}]
-  (let [code (new-code)
-        file (code-file w code)]
-    (fs/create-dirs (fs/parent file))
-    (spit (fs/file file) (pr-str {:expires (+ (now) (* 60 code-minutes))}))
-    code))
-
-(defn- claim-code!
-  "True when `code` is open and not expired. Either way it is gone
-   afterwards. The delete is what makes it work once: of two callers with
-   the same code only one deletes the file."
-  [w code]
-  (let [file (code-file w code)
-        record (when (fs/exists? file)
-                 (try
-                   (edn/read-string (slurp (fs/file file)))
-                   (catch Exception _ nil)))]
-    (boolean (and (fs/delete-if-exists file)
-                  (some-> (:expires record) (> (now)))))))
+   One text holds one key or several, apart by commas, blanks or line
+   breaks, so that the variable `REP_PUBLIC_KEYS` takes two keys while
+   an issuer changes its own. Throws for a text that is no such key,
+   and names it: a public key is no secret. What is no text is taken
+   for a key that was read before."
+  [given]
+  (->> (if (string? given) [given] given)
+       (mapcat #(if (string? %)
+                  (map public-key (written %))
+                  [%]))
+       (vec)))
 
 (defn- encode
-  "`data` as JSON in URL-safe Base64 without padding."
+  "`data` as base64url without padding."
   [data]
-  (.encodeToString (.withoutPadding (java.util.Base64/getUrlEncoder))
-                   (.getBytes (json/generate-string data) "UTF-8")))
+  (.encodeToString (.withoutPadding (java.util.Base64/getUrlEncoder)) data))
 
 (defn- decode
+  "The bytes of `part` when it is base64url without padding and written
+   the one way its bytes are written, else nil. Java's decoder also
+   takes padding and loose last bits, which is why the bytes are
+   written again and compared."
   [part]
-  (json/parse-string (String. (.decode (java.util.Base64/getUrlDecoder) (str part)) "UTF-8")))
+  (when (re-matches #"[A-Za-z0-9_-]+" part)
+    (try
+      (let [data (.decode (java.util.Base64/getUrlDecoder) ^String part)]
+        (when (= part (encode data))
+          data))
+      (catch IllegalArgumentException _ nil))))
 
-(defn sign
-  "A JWT with `claims`, signed with HMAC-SHA256 under the server's key."
-  [{:rep/keys [secret]} claims]
-  (let [content (str (encode {"alg" "HS256" "typ" "JWT"}) "." (encode claims))]
-    (str content "." (files/hmac secret content))))
+(defn- object
+  "The JSON object that `data` writes, or nil."
+  [data]
+  (let [value (try
+                (json/parse-string (String. ^bytes data "UTF-8"))
+                (catch Exception _ nil))]
+    (when (map? value)
+      value)))
 
-(defn- token-file
-  "The record of the token `jti`, or nil when `jti` is no UUID."
-  [{:rep/keys [state-dir]} jti]
-  (when (parse-uuid (str jti))
-    (fs/path state-dir "tokens" (str jti))))
+(defn- verifies?
+  "True when `signature` is the Ed25519 signature of `content` under
+   `key`."
+  [key content signature]
+  (try
+    (.verify (doto (java.security.Signature/getInstance "Ed25519")
+               (.initVerify key)
+               (.update ^bytes content))
+             signature)
+    (catch Exception _ false)))
 
-(defn issue!
-  "A new token that holds for `:rep/token-days`, and its record."
-  [{:rep/keys [token-days] :as w}]
-  (let [issued (now)
-        claims {"iss" "rep"
-                "iat" issued
-                "exp" (+ issued (* 86400 token-days))
-                "jti" (str (random-uuid))}
-        file (token-file w (get claims "jti"))]
-    (fs/create-dirs (fs/parent file))
-    (spit (fs/file file) (pr-str {:jti (get claims "jti")
-                                  :issued issued
-                                  :expires (get claims "exp")}))
-    (sign w claims)))
+(defn- fits?
+  "True when `aud` names `audience`: it is that very text, or an array
+   that has it."
+  [audience aud]
+  (boolean (and (string? audience)
+                (not (str/blank? audience))
+                (or (= audience aud)
+                    (and (sequential? aud) (some #(= audience %) aud))))))
 
-(defn exchange!
-  "The token for a login code, or nil for a code that is unknown, used or
-   expired."
-  [w code]
-  (when (claim-code! w code)
-    (issue! w)))
+(defn- unfit
+  "Why the claims of a token whose signature holds do not let it in, as
+   a keyword, or nil when they do."
+  [audience {:strs [exp nbf aud] :as claims}]
+  (cond
+    (not (map? claims)) :claims
+    (not (number? exp)) :no-exp
+    (not (< (now) exp)) :expired
+    (and (contains? claims "nbf") (not (and (number? nbf) (<= nbf (now))))) :not-yet-valid
+    (nil? aud) :no-audience
+    (not (fits? audience aud)) :audience))
+
+(defn check
+  "Verifies `token` for the system `w`, which has `:rep/public-keys`,
+   the keys of `public-keys`, and `:rep/audience`, the name of this
+   machine. Answers `:auth/claims`, all claims of the token as a map
+   with string keys, or `:auth/refused`, the reason as a keyword of the
+   list above."
+  [{:rep/keys [public-keys audience]} token]
+  (let [token (str token)
+        parts (when (<= (count token) max-token-chars)
+                (str/split token #"\." -1))
+        [header payload signature] (when (= 3 (count parts))
+                                     (map decode parts))
+        head (some-> header object)
+        content (.getBytes (str (first parts) "." (second parts)) "US-ASCII")
+        unsigned (cond
+                   (str/blank? token) :no-token
+                   (empty? public-keys) :no-keys
+                   (nil? parts) :too-long
+                   (not (and head payload signature)) :malformed
+                   (not= "EdDSA" (get head "alg")) :algorithm
+                   (contains? head "crit") :critical
+                   (not-any? #(verifies? % content signature) public-keys) :signature)
+        claims (when-not unsigned
+                 (object payload))
+        refused (or unsigned (unfit audience claims))]
+    (if refused
+      {:auth/refused refused}
+      {:auth/claims claims})))
 
 (defn claims
-  "The claims of `token` when it is one of ours and still good: the
-   signature fits, it has not expired and its record is there. Else nil."
-  [{:rep/keys [secret] :as w} token]
-  (try
-    (let [[header payload signature & more] (str/split (str token) #"\.")
-          content (str header "." payload)]
-      (when (and header payload signature (not more)
-                 (same? signature (files/hmac secret content))
-                 (= "HS256" (get (decode header) "alg")))
-        (let [{:strs [iss exp jti] :as claims} (decode payload)]
-          (when (and (= "rep" iss)
-                     (number? exp)
-                     (> exp (now))
-                     (some-> (token-file w jti) fs/exists?))
-            claims))))
-    (catch Exception _ nil)))
+  "The claims of `token` when `check` lets it in, else nil."
+  [w token]
+  (:auth/claims (check w token)))
 
-(defn revoke!
-  "Removes the record of the token `jti`. True when there was one."
-  [w jti]
-  (boolean (some-> (token-file w jti) fs/delete-if-exists)))
-
-(defn tokens
-  "The records of the tokens that are still good, oldest first."
-  [{:rep/keys [state-dir]}]
-  (let [folder (fs/path state-dir "tokens")]
-    (when (fs/exists? folder)
-      (->> (fs/list-dir folder)
-           (keep #(try
-                    (edn/read-string (slurp (fs/file %)))
-                    (catch Exception _ nil)))
-           (filter #(> (:expires %) (now)))
-           (sort-by :issued)))))
+(defn session
+  "The session that a token's `claims` name, for a request whose path
+   names none: the claim `sid` when the token has one, else `sub`. Each
+   is a text that is not blank. A text that is a UUID is the session's
+   id as it stands. Any other text becomes one, the name-based UUID of
+   its UTF-8 bytes (version 3, `java.util.UUID/nameUUIDFromBytes`), so
+   the same text names the same session after every restart. Nil for
+   claims with neither."
+  [claims]
+  (when-let [named (->> [(get claims "sid") (get claims "sub")]
+                        (filter #(and (string? %) (not (str/blank? %))))
+                        (first))]
+    (str (or (parse-uuid named)
+             (java.util.UUID/nameUUIDFromBytes (.getBytes ^String named "UTF-8"))))))
 
 (comment
-  (def w {:rep/state-dir "work/.rep" :rep/code-minutes 10 :rep/token-days 30
-          :rep/secret (secret! "work/.rep")})
-  (def code (mint-code! w))
-  (def token (exchange! w code))
-  (exchange! w code)
-  (claims w token)
-  (tokens w)
-  (revoke! w (get (claims w token) "jti")))
+  (require '[rep.token :as token])
+  (def pair (token/key-pair))
+  (def w {:rep/public-keys (public-keys (:token/public-key pair))
+          :rep/audience "my-machine"})
+  (def token (token/sign {"aud" "my-machine" "sub" "max" "exp" (+ (now) 3600)}
+                         (:token/private-key pair)))
+  (check w token)
+  (check w (str token "x"))
+  (check (assoc w :rep/audience "another-machine") token)
+  (session (claims w token))
+  (session {"sid" "0b0f6a0e-4c56-4b6b-9a52-7f6f3f0f8a11"}))

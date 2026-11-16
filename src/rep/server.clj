@@ -7,7 +7,9 @@
      GET  /file/<path>          answers the file, a part of it with a
                                 Range header
 
-   Each needs the header `Authorization: Bearer <token>`.
+   Each needs the header `Authorization: Bearer <token>`. The token is a
+   JWT that somebody else signed. The server verifies it against a
+   public key and does nothing else about who calls, see `rep.auth`.
 
    The body of the POST is Clojure code for the session, a babashka
    process of its own. The answer is plain text: what the code printed
@@ -15,9 +17,6 @@
    it. The outcome travels in the headers Rep-Status and Rep-Exit, so the
    text needs no frame around it. The same POST again runs nothing, it
    answers the same text, from byte `?from=` on when asked.
-
-     POST /login    body = a login code, answer = a token (see `rep.auth`)
-     POST /logout   ends the token it is sent with
 
    With `:rep/shared-image?` all sessions evaluate in one babashka
    process that starts with the server, see `rep.image`."
@@ -31,7 +30,8 @@
             [rep.files :as files]
             [rep.image :as image]
             [rep.output :as output]
-            [rep.session :as session]))
+            [rep.session :as session]
+            [rep.token :as token]))
 
 (def text-headers
   {"Content-Type" "text/plain; charset=utf-8"})
@@ -51,11 +51,8 @@
     ""
     "POST /rep/<session-uuid>/<evaluation-uuid>   body = Clojure code, answer = plain text"
     ""
-    "Send the header Authorization: Bearer <token>."
-    "If you were given a login code, exchange it once for a token. Keep the token in a file and do not print it:"
-    "  curl -s -X POST --data-binary \"$CODE\" \"$REP_URL/login\" -o ~/.rep-token"
-    "  then send -H \"Authorization: Bearer $(cat ~/.rep-token)\""
-    "POST /logout with that header ends the token."
+    "Send the header Authorization: Bearer <token>, with the token you were given."
+    "Keep the token in a file or a variable and do not print it."
     ""
     "Pick one session uuid and keep it. A session is a babashka process, definitions stay in it."
     "Use a new evaluation uuid for every new piece of code."
@@ -90,55 +87,25 @@
            (re-matches #"(?i)\s*bearer +(\S+)\s*")
            (second)))
 
-(defn- authorized?
-  "True for the static token, when one is configured, and for a token the
-   server gave out that is still good."
-  [{:rep/keys [token] :as w} request]
-  (let [given (bearer request)]
-    (boolean
-     (and given
-          (or (and token
-                   (java.security.MessageDigest/isEqual (.getBytes given "UTF-8")
-                                                        (.getBytes (str token) "UTF-8")))
-              (auth/claims w given))))))
-
-(defn- login
-  "Answers /login. The body is a login code, the answer its token and
-   nothing else, so that a caller can write it straight into a file. Only
-   a POST looks at the code. A link preview that GETs the address burns
-   nothing."
-  [w {:keys [request-method body]}]
-  (if (not= :post request-method)
-    (text 405 "POST the login code as the body.\n")
-    (if-let [token (some->> body
-                            (.readAllBytes)
-                            (String.)
-                            (not-empty)
-                            (auth/exchange! w))]
-      (text 200 token)
-      (text 401 "This code is unknown, used or expired. Ask for a new one.\n"))))
-
-(defn- logout
-  "Answers /logout: ends the token the request was sent with."
-  [w {:keys [request-method] :as request}]
-  (let [claims (some->> (bearer request) (auth/claims w))]
-    (cond
-      (not= :post request-method)
-      (text 405 "POST with the token as the bearer.\n")
-
-      claims
-      (do
-        (auth/revoke! w (get claims "jti"))
-        (text 200 "Logged out.\n"))
-
-      :else
-      (text 401 "Send the token you want to end as Authorization: Bearer <token>.\n"))))
-
 (def unauthorized
-  "What every request without a token that is good gets to hear."
+  "What a request hears whose token `rep.auth/check` does not let in,
+   whatever the reason: a caller that probes learns nothing from it.
+   The reason goes to the server's own standard error, see `claims`."
   {:status 401
-   :headers text-headers
-   :body "Send the header Authorization: Bearer <token>. GET / tells how to get one.\n"})
+   :headers (assoc text-headers "WWW-Authenticate" "Bearer")
+   :body (str "Send the header Authorization: Bearer <token>, with a token this server accepts. "
+              "GET / tells how this works.\n")})
+
+(defn- claims
+  "The claims of the token that `request` carries, or nil when it is
+   refused. Says on standard error that a request was refused and why,
+   and nothing of the request: neither its path nor its token."
+  [w request]
+  (let [{:auth/keys [claims refused]} (auth/check w (bearer request))]
+    (when refused
+      (binding [*out* *err*]
+        (println "rep: a request was refused:" (get auth/reasons refused))))
+    claims))
 
 (defn- file
   "Answers a request to `/file/<path>`, which needs the bearer token as
@@ -148,7 +115,7 @@
   [w {:keys [request-method] :as request}]
   (let [path (files/requested request)]
     (cond
-      (not (authorized? w request))
+      (not (claims w request))
       unauthorized
 
       (not (contains? #{:put :get :head} request-method))
@@ -221,15 +188,14 @@
                      "Rep-Session" (name (:submit/session submitted))})))))))
 
 (defn rep-path?
-  "True when the path `uri` of a request is one of rep's own: `/login`,
-   `/logout` and everything below `/rep/` and `/file/`. A host that owns
-   the HTTP server hands such a request to `handle` and answers every
-   other one itself. `/` is not among them. `handle` answers it with the
-   usage text, but a host has a page of its own there."
+  "True when the path `uri` of a request is one of rep's own:
+   everything below `/rep/` and `/file/`. A host that owns the HTTP
+   server hands such a request to `handle` and answers every other one
+   itself. `/` is not among them. `handle` answers it with the usage
+   text, but a host has a page of its own there."
   [uri]
   (let [uri (str uri)]
-    (or (contains? #{"/login" "/logout"} uri)
-        (str/starts-with? uri "/rep/")
+    (or (str/starts-with? uri "/rep/")
         (str/starts-with? uri "/file/"))))
 
 (defn handle
@@ -241,8 +207,6 @@
                                 the bearer token
      GET  /file/<path>          answers the file, HEAD its length alone,
                                 both need the bearer token
-     POST /login                exchanges a login code for a token
-     POST /logout               ends the token it is sent with
      GET  /                     the usage text for an agent
 
    `start!` puts it behind an HTTP server of rep's own. A host that
@@ -263,16 +227,10 @@
       (str/starts-with? uri "/file/")
       (file w request)
 
-      (= "/login" uri)
-      (login w request)
-
-      (= "/logout" uri)
-      (logout w request)
-
       (not (and (= "rep" root) session id (not more)))
       (text 404 "Not found. GET / tells how this works.\n")
 
-      (not (authorized? w request))
+      (not (claims w request))
       unauthorized
 
       (not (and (parse-uuid session) (parse-uuid id)))
@@ -289,12 +247,15 @@
 
    :rep/dir           the work folder, where the sessions run and files live
    :rep/state-dir     where the evaluations are kept, `.rep` in the work folder
-   :rep/token         a static bearer token, for tests and automation. Without
-                      one, callers log in with a code (see `rep.auth`)
-   :rep/secret        the key that signs the tokens, from `REP_SECRET` or kept
-                      in the state folder
-   :rep/code-minutes  how long a login code holds, 10
-   :rep/token-days    how long a token holds, 30
+   :rep/public-keys   the Ed25519 public keys a token's signature may be
+                      from, one text with one or several keys or a vector
+                      of such texts, also `REP_PUBLIC_KEYS`. A key is the
+                      base64 of its SubjectPublicKeyInfo or its PEM file,
+                      see `rep.auth/public-keys`. Without a key every
+                      request is refused. A text that is no key throws
+   :rep/audience      the name of this machine, which the `aud` of a token
+                      has to hold, also `REP_AUDIENCE`. A server with keys
+                      and without it throws
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
    :rep/setup-ms      how long the setup of a fresh process may take, the
@@ -356,14 +317,17 @@
               (not-empty (System/getenv variable)))
         dir (str (fs/absolutize (or (:rep/dir options) (env "REP_DIR") "work")))
         state-dir (str (or (:rep/state-dir options) (fs/path dir ".rep")))
-        _ (fs/create-dirs dir)
-        secret (or (:rep/secret options) (env "REP_SECRET") (auth/secret! state-dir))]
+        public-keys (auth/public-keys (or (:rep/public-keys options) (env "REP_PUBLIC_KEYS") []))
+        audience (or (:rep/audience options) (env "REP_AUDIENCE"))]
+    (when (and (seq public-keys) (str/blank? audience))
+      (throw (ex-info (str "A server with public keys needs the name a token's aud has to hold: "
+                           "set :rep/audience or REP_AUDIENCE.")
+                      {:rep/error :audience})))
+    (fs/create-dirs dir)
     (merge {:rep/dir dir
             :rep/state-dir state-dir
-            :rep/token (or (:rep/token options) (env "REP_TOKEN"))
-            :rep/secret secret
-            :rep/code-minutes 10
-            :rep/token-days 30
+            :rep/public-keys public-keys
+            :rep/audience audience
             :rep/prelude (env "REP_PRELUDE")
             :rep/setup-ms session/setup-ms
             :rep/shared-image? (contains? #{"1" "true"} (env "REP_SHARED_IMAGE"))
@@ -382,7 +346,7 @@
             :rep/sessions (atom {})
             :rep/image (atom {:image/generation 0 :image/seen {}})
             :rep/evaluations (atom {})}
-           (dissoc options :rep/dir :rep/state-dir :rep/token :rep/secret))))
+           (dissoc options :rep/dir :rep/state-dir :rep/public-keys :rep/audience))))
 
 (def sweep-ms
   "How long the sweeper waits between two sweeps: a day."
@@ -526,37 +490,73 @@
       max-body-mb (assoc :rep/max-body (* max-body-mb 1024 1024))
       door (assoc :rep/door? true))))
 
+(def trial-seconds
+  "How long the token of a try on a laptop holds: a day."
+  86400)
+
+(defn- trial
+  "What `bb serve` adds for a try on a laptop, when no public key is
+   configured: `:rep/public-keys`, the public half of a key pair made
+   here, `:rep/audience`, and `:trial/token`, one token signed with the
+   other half, good for `trial-seconds`. The private key is dropped
+   when this function returns and nothing is written to disk, so no
+   second token can follow and a restart ends this one."
+  [{:rep/keys [audience]}]
+  (let [{:token/keys [public-key private-key]} (token/key-pair)
+        audience (or (not-empty audience) "rep")]
+    {:rep/public-keys (auth/public-keys public-key)
+     :rep/audience audience
+     :trial/token (token/sign {"aud" audience
+                               "sub" "laptop"
+                               "iat" (auth/now)
+                               "exp" (+ (auth/now) trial-seconds)}
+                              private-key)}))
+
 (defn -main
   "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--prelude FILE]
-            [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32] [--door]"
+            [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32] [--door]
+
+   With `REP_PUBLIC_KEYS` and `REP_AUDIENCE` the server verifies the
+   tokens of whoever holds the private key, and makes none itself.
+   Without a public key it is a try on a laptop: it prints one token of
+   a key pair that lives in this process only, see `trial`."
   [& args]
-  (let [w (-> (cli-options args)
-              (prepare)
-              (start!))]
-    (println (str "rep listens on http://" (:rep/ip w) ":" (:rep/port w)))
+  (let [prepared (prepare (cli-options args))
+        made (when (empty? (:rep/public-keys prepared))
+               (trial prepared))
+        w (start! (merge prepared (dissoc made :trial/token)))
+        url (str "http://" (:rep/ip w) ":" (:rep/port w))]
+    (println (str "rep listens on " url))
     (println (str "Work folder: " (:rep/dir w)))
     (when (:rep/shared-image? w)
       (println "All sessions share one image."))
     (when (:rep/door? w)
       (println "The door is on: rep's own listener stands in front of http-kit and sends files of any size."))
-    (if (:rep/token w)
-      (println "Callers send the static token of REP_TOKEN.")
-      (let [code (auth/mint-code! w)]
-        (println (str "Login code, good once and for " (:rep/code-minutes w) " minutes: " code))
-        (println (str "  rep login " code))
-        (println "bb code makes another one.")))
+    (if made
+      (do
+        (println (str "No public key is configured (REP_PUBLIC_KEYS), so this is a try on a laptop: rep made a key pair "
+                      "that lives in this process only and signed one token with it, good for a day. Nothing of it "
+                      "is on disk, and a restart ends the token. A server for others gets the public key of whoever "
+                      "hands out its tokens."))
+        (println (str "export REP_URL=" url))
+        (println (str "export REP_TOKEN=" (:trial/token made))))
+      (println (str "Callers send a token for the audience " (pr-str (:rep/audience w)) ", signed with "
+                    (if (= 1 (count (:rep/public-keys w)))
+                      "the configured public key's other half."
+                      (str "the other half of one of the " (count (:rep/public-keys w)) " configured public keys.")))))
     @(promise)))
 
 (comment
-  (def w (start! (prepare {:rep/port 8730 :rep/token "dev"})))
+  (def pair (token/key-pair))
+  (def options {:rep/public-keys (:token/public-key pair) :rep/audience "dev"})
+  (def w (start! (prepare (assoc options :rep/port 8730))))
+  (def bearer-token (token/sign {"aud" "dev" "sub" "me" "exp" (+ (auth/now) 3600)} (:token/private-key pair)))
   (stop! w)
-  ;; curl -s -H 'Authorization: Bearer dev' --data-binary '(+ 1 2)' \
-  ;;   http://127.0.0.1:8730/rep/$(uuidgen)/$(uuidgen)
 
   (cli-options ["--port" "8730" "--shared-image" "--class-path" "shop/src,shop/resources"])
 
   ;; a host with an HTTP server of its own mounts the handler
-  (def w (image/start! (prepare {:rep/token "dev" :rep/shared-image? true})))
+  (def w (image/start! (prepare (assoc options :rep/shared-image? true))))
   (defn host-handler
     [request]
     (if (rep-path? (:uri request))

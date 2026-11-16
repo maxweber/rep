@@ -1,0 +1,349 @@
+{
+ "made-with": "node v26.12.0, crypto on OpenSSL 3.5.9",
+ "now": 1700000000,
+ "audience": "rep-test",
+ "keys": {
+  "first": "MCowBQYDK2VwAyEApmWJM7J5JKNVvjKrjWmIq/0FdC6EwgCtmgfXXJGhixY=",
+  "second": "MCowBQYDK2VwAyEA9mqCo24HOmc4anedIDD/+OadzU9PdGYrDsh6SsWk2bM=",
+  "first-pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApmWJM7J5JKNVvjKrjWmIq/0FdC6EwgCtmgfXXJGhixY=\n-----END PUBLIC KEY-----\n"
+ },
+ "tokens": [
+  {
+   "name": "one key",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.xg-4dYUousflB4wPDqL823M3e6KUFoTtGYyXje4VFRPUoePpXt668_tbP6ykK5kDTF1IaEJQjGkCXRBDOSIMCg",
+   "claims": {
+    "aud": "rep-test",
+    "sub": "max",
+    "exp": 1700003600
+   }
+  },
+  {
+   "name": "the second of two keys",
+   "keys": [
+    "first",
+    "second"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.tflyMj6ZbWnCYblqNX7MbcElfDbIImy0W_yoNJzvz0Ch80nimFV4nRojaSBH03LJy8q1dngwX_Z82Lz_aBybAA",
+   "claims": {
+    "aud": "rep-test",
+    "sub": "max",
+    "exp": 1700003600
+   }
+  },
+  {
+   "name": "the first of two keys",
+   "keys": [
+    "first",
+    "second"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.xg-4dYUousflB4wPDqL823M3e6KUFoTtGYyXje4VFRPUoePpXt668_tbP6ykK5kDTF1IaEJQjGkCXRBDOSIMCg",
+   "claims": {
+    "aud": "rep-test",
+    "sub": "max",
+    "exp": 1700003600
+   }
+  },
+  {
+   "name": "aud as an array",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsiYW5vdGhlci1tYWNoaW5lIiwicmVwLXRlc3QiXSwic3ViIjoibWF4IiwiZXhwIjoxNzAwMDAzNjAwfQ._2WQVHHYTu0JhQ1HRfuu0gS9GtL6LahOAU-I09acKxoBLrmzOynXd9cPz6EsgseNoqO1D6UwmEdvzr1qxofgDw",
+   "claims": {
+    "aud": [
+     "another-machine",
+     "rep-test"
+    ],
+    "sub": "max",
+    "exp": 1700003600
+   }
+  },
+  {
+   "name": "nbf at this second, exp as a fraction, claims rep does not read",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMDAwMC41LCJzaWQiOiJkZXNrIiwibmJmIjoxNzAwMDAwMDAwLCJpYXQiOjE2OTk5OTk5OTUsInJ1biI6dHJ1ZX0.tvAPTM0el5zbKu0uFsp3EhyIGylBPIrbXd9jA9iXZVtBY2WR6eI3WhA6bOftLotTjKlHiV-qtVZTDUTiNMtKAQ",
+   "claims": {
+    "aud": "rep-test",
+    "sub": "max",
+    "exp": 1700000000.5,
+    "sid": "desk",
+    "nbf": 1700000000,
+    "iat": 1699999995,
+    "run": true
+   }
+  },
+  {
+   "name": "a kid in the header, which chooses nothing",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6Im5vLXN1Y2gta2V5In0.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.lRFqZthyMNCvken46yoopjbMaPNYti6ef4KsXsGwGGH6dmvkXdQvis5NEANwDJI7x0iqopKvgqKW1S2S2_U8Dw",
+   "claims": {
+    "aud": "rep-test",
+    "sub": "max",
+    "exp": 1700003600
+   }
+  },
+  {
+   "name": "alg none without a signature",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJub25lIn0.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.",
+   "refused": "malformed"
+  },
+  {
+   "name": "alg none, signed all the same",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJub25lIn0.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.ynbhC7AK7-_TNi0AJj8Z3zTzb50wmPusZQfpT6ZL3JGYxrQ4sOYdUlNJpbDQgMjuBMhgttTdD1Zxjhw3EvEDBA",
+   "refused": "algorithm"
+  },
+  {
+   "name": "alg in lower case",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJlZGRzYSJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.BB_K1a9q4fTdtv-fLUnlT0shz8Mvg63ZYDxQc-S6z2eUKQZewrF-vyWto-masZtwUhUIypFrAReo1aTR7IvfBA",
+   "refused": "algorithm"
+  },
+  {
+   "name": "no alg",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJ0eXAiOiJKV1QifQ.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.pIQnxtuqUokqX_UUlCZnox_cMEESKuhiq6iZQroaL8RdUjU6xR7u8XuhQE6hcb4dqNeKKtXb9k5tMTB3nH_pBw",
+   "refused": "algorithm"
+  },
+  {
+   "name": "HS256 over the public key's PEM text",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.HzTVYrWNJOaSHaslxbkPmWZE3ROfxFmRfzFKPSA3DS0",
+   "refused": "algorithm"
+  },
+  {
+   "name": "HS256 over the public key's DER",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.O5gaxlaxiI-pg4525NVt2jYNQboY0Rs69fqeDmCAPHg",
+   "refused": "algorithm"
+  },
+  {
+   "name": "HS256 over the public key's base64",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.7SnD23xwIdHptnWZt7-e8RjOfCWx3g2ZijQxHxoAyXg",
+   "refused": "algorithm"
+  },
+  {
+   "name": "HS256 over the public key's 32 bytes",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.XNHCbNLcDSf8RZqvKJfac88OzIrhw7IPZw1WE9S7GDs",
+   "refused": "algorithm"
+  },
+  {
+   "name": "a cut signature",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.xg-4dYUousflB4wPDqL823M3e6KUFoTtGYyXje4VFRPUoePpXt668_tbP6ykK5kDTF1IaEJQjGkCXRBDOSIM",
+   "refused": "signature"
+  },
+  {
+   "name": "a changed payload",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6InJvb3QiLCJleHAiOjE3MDAwMDM2MDB9.xg-4dYUousflB4wPDqL823M3e6KUFoTtGYyXje4VFRPUoePpXt668_tbP6ykK5kDTF1IaEJQjGkCXRBDOSIMCg",
+   "refused": "signature"
+  },
+  {
+   "name": "another key",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.GjZ_VJb5AcJSFO1UEOIfF9mBiw7JxtHBY_3yv44p9uCqd74mBLUHKsbWpZ7lYIRu9QbC0EiQuhr7cCRXCxSaDA",
+   "refused": "signature"
+  },
+  {
+   "name": "the second key where only the first is configured",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.tflyMj6ZbWnCYblqNX7MbcElfDbIImy0W_yoNJzvz0Ch80nimFV4nRojaSBH03LJy8q1dngwX_Z82Lz_aBybAA",
+   "refused": "signature"
+  },
+  {
+   "name": "a jwk in the header that holds the attacker's key",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImp3ayI6eyJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6IkV4ZHRHOVVKWllKS094clVfMGZQV1QyOHNpcVRKZXk1OHJ3QlBPR3ZmcWsifX0.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.RouUQS4lEEQ4KzOIthUZf-PKECATyRbnjSOXjuowLQd205g8uIzCEv8nKrb-awYuaSwrG91Dpkf2nIOP3o1-Aw",
+   "refused": "signature"
+  },
+  {
+   "name": "a jku, an x5u and an x5c in the header",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImprdSI6Imh0dHBzOi8vYXR0YWNrZXIuZXhhbXBsZS9rZXlzLmpzb24iLCJ4NXUiOiJodHRwczovL2F0dGFja2VyLmV4YW1wbGUvY2VydC5wZW0iLCJ4NWMiOlsiTUNvd0JRWURLMlZ3QXlFQUV4ZHRHOVVKWllKS094clUvMGZQV1QyOHNpcVRKZXk1OHJ3QlBPR3ZmcWs9Il19.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.hngOS8Rvk0FUupV9ZcvftPqnq2d5K0Txg7G-IaE0GQHhu46x8y4GL9EIvs5f5x9HdIYjDznQu1qqWrCva6lOBQ",
+   "refused": "signature"
+  },
+  {
+   "name": "a kid in the header and the attacker's key",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImZpcnN0In0.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.6jZ9SdX2918Y-Svc2Dmpw3ZEk2ZtiLE6TeqNxRIqdOctr8i5tBEYNU09Urc_ZwmRWtcq6nQ92S_XDzd5wBG8Bw",
+   "refused": "signature"
+  },
+  {
+   "name": "crit in the header",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImNyaXQiOlsiZXhwIl19.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.EwosnDUN0VdRZkQqgDi4An8dhkhTQB4KNZBb_fHI_tf5ZoKDtWmFtEPVlcHpQDd-FPotiuwmPem_zNnCOgH3AQ",
+   "refused": "critical"
+  },
+  {
+   "name": "expired",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTY5OTk5OTk5OX0.MXuK5KWcmzVOKW0F7ho-one2chtnInZffmYdID4R73EOoOkl-J7USw9Pin1tKk49DmL_sNsCzWzfwAwqkhVPCg",
+   "refused": "expired"
+  },
+  {
+   "name": "exp at this second",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMDAwMH0.hxSvKMoC1656dQM51mntxkDuClauXzcy9C6glEyblUlslX6gG638Sv_MbDuezouGmYlbYsCRh3jg3nKAcUbzAQ",
+   "refused": "expired"
+  },
+  {
+   "name": "no exp",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCJ9.O_yPRZjGXpaSuzQta3BOQRAL2vE4IpeIiftfeKY2N6k8kMFWANbwIQgGjE-IY_8YwMYnW8ENSHtnQ05oUp8gAg",
+   "refused": "no-exp"
+  },
+  {
+   "name": "exp as a string",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6IjE3MDAwMDM2MDAifQ.zeAiNTWnDzg2XLFKCHuwVCqNviPyfhaf6_bQLfejr62Gn3d6hYC86PEakqY_RPgoydC4W6C-jOe1_wMfq465DQ",
+   "refused": "no-exp"
+  },
+  {
+   "name": "not yet valid",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMCwibmJmIjoxNzAwMDAwMDYwfQ.KTkPIcapk0yYuFiYsG-5vBsfOCaV55X8BapQcYT4h7JciDkklrSFOGLwEnbDp01r2hLxFY2Ez-yGeDyAXqrOBg",
+   "refused": "not-yet-valid"
+  },
+  {
+   "name": "nbf that is no number",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMCwibmJmIjoic29vbiJ9.I_I7cYtp3iJCJ7o4bha3-FzPwZ1F6qO_uhxXoSmNo4ZcKkTKx2fbvkaWU7lI-l0I3RZ17emaprmnALzR2bdKBA",
+   "refused": "not-yet-valid"
+  },
+  {
+   "name": "no aud",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJtYXgiLCJleHAiOjE3MDAwMDM2MDB9.c79_G5E8HkJjSGnGfB0qFAAUsBETCFZxgh-x5ieq9-oBNcB1Te-rclIl9OBrqg-jinqbmYqScwUh1MRYmdJiDg",
+   "refused": "no-audience"
+  },
+  {
+   "name": "another aud",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJhbm90aGVyLW1hY2hpbmUiLCJzdWIiOiJtYXgiLCJleHAiOjE3MDAwMDM2MDB9.OdHWLnZod7qSJyEaHpw4WxntuXBchmDU7WdogfMEJzLDJA2Wt0lU3CuNiaPE4XumI4EGezHHw6KQG7i0MmzuDA",
+   "refused": "audience"
+  },
+  {
+   "name": "an aud that only starts like this machine's",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdC0yIiwic3ViIjoibWF4IiwiZXhwIjoxNzAwMDAzNjAwfQ.ok4zy-wAEDksxlHmGKGUQ1X3DcrqCcugRSN9-mCBDqbznI3Fe-R5FNWXI5XpaBYfrMFZUBYHgI9YbcZTZfMwCA",
+   "refused": "audience"
+  },
+  {
+   "name": "an aud array without this machine",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOlsiYW5vdGhlci1tYWNoaW5lIixudWxsXSwic3ViIjoibWF4IiwiZXhwIjoxNzAwMDAzNjAwfQ.LmNnLgZ6G2i9gd92ketuSGoVSZ18EBbvst4F1v8Wmw4cs0J9SEwUhkr6n53jRCTtlr7rcFQsvOrAl3NtG1tQBQ",
+   "refused": "audience"
+  },
+  {
+   "name": "four parts",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.xg-4dYUousflB4wPDqL823M3e6KUFoTtGYyXje4VFRPUoePpXt668_tbP6ykK5kDTF1IaEJQjGkCXRBDOSIMCg.bW9yZQ",
+   "refused": "malformed"
+  },
+  {
+   "name": "two parts",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0",
+   "refused": "malformed"
+  },
+  {
+   "name": "padding on the signature",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.xg-4dYUousflB4wPDqL823M3e6KUFoTtGYyXje4VFRPUoePpXt668_tbP6ykK5kDTF1IaEJQjGkCXRBDOSIMCg==",
+   "refused": "malformed"
+  },
+  {
+   "name": "a header that is no JSON",
+   "keys": [
+    "first"
+   ],
+   "token": "bm90IGpzb24.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMH0.mFYBD1Zb1Y_-MlY21OLx8uKxAuN1fxTFG5-XiOW_0cp1QZCR97iLP5zUBnnCPMidrTvotCm9-_-H1Wh0irbYBA",
+   "refused": "malformed"
+  },
+  {
+   "name": "a payload that is no JSON object",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.WzEsMiwzXQ.vmixPbfji8ulkCuZwkbXcva8Bz-GHqrqCTJeX5jLIK5FfHAqlvXActX2LHZ-umcSnAsm0UuKNsFhuLY29wsVAQ",
+   "refused": "claims"
+  },
+  {
+   "name": "a huge token",
+   "keys": [
+    "first"
+   ],
+   "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJyZXAtdGVzdCIsInN1YiI6Im1heCIsImV4cCI6MTcwMDAwMzYwMCwicGFkIjoieHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4In0.fl27ua68BFhPWBT7Ue9aRCJSeMC4XfPr2XnSsQcep0TXXppO-Key1XB6OETdtm5lrhRJXVHYUWlu9y8VP1hXBw",
+   "refused": "too-long"
+  }
+ ]
+}

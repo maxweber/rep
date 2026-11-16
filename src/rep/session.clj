@@ -14,9 +14,10 @@
             [rep.nrepl :as nrepl]))
 
 (def hidden-variables
-  "What a session does not inherit from the server's environment: the
-   static token and the key that signs tokens."
-  #{"REP_TOKEN" "REP_SECRET"})
+  "What a session does not inherit from the server's environment:
+   `REP_TOKEN`, the name a caller keeps its token under. The server has
+   no use for it, and a server started from a caller's shell has it."
+  #{"REP_TOKEN"})
 
 (defn environment
   "`env` without the hidden variables."
