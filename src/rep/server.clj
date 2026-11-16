@@ -2,10 +2,12 @@
   "REP over HTTP: read, eval, print, and the loop stays with the caller.
 
      POST /rep/<session>/<id>   evaluates the body, answers its output
-     PUT  /file/<path>?...      a signed upload into the work folder,
-                                with &offset=<n> one part of a large file
-     GET  /file/<path>?...      a signed download out of it, a part of
-                                it with a Range header
+     PUT  /file/<path>          the body becomes a file of the work folder,
+                                with ?offset=<n> one part of a large file
+     GET  /file/<path>          answers the file, a part of it with a
+                                Range header
+
+   Each needs the header `Authorization: Bearer <token>`.
 
    The body of the POST is Clojure code for the session, a babashka
    process of its own. The answer is plain text: what the code printed
@@ -80,12 +82,13 @@
     :body body}))
 
 (defn- bearer
-  "The token the request carries, or nil."
+  "The token the request carries in its header `Authorization: Bearer
+   <token>`, or nil. A token anywhere else, in the query for one, is no
+   token."
   [request]
-  (some-> (get-in request [:headers "authorization"])
-          (str/replace-first #"(?i)^bearer\s+" "")
-          (str/trim)
-          (not-empty)))
+  (some->> (get-in request [:headers "authorization"])
+           (re-matches #"(?i)\s*bearer +(\S+)\s*")
+           (second)))
 
 (defn- authorized?
   "True for the static token, when one is configured, and for a token the
@@ -131,13 +134,34 @@
       :else
       (text 401 "Send the token you want to end as Authorization: Bearer <token>.\n"))))
 
-(defn- base-url
-  "Where the caller reached the server, for the URLs handed out to it."
-  [{:rep/keys [public-url]} {:keys [headers scheme]}]
-  (or public-url
-      (str (or (get headers "x-forwarded-proto") (name (or scheme :http)))
-           "://"
-           (get headers "host"))))
+(def unauthorized
+  "What every request without a token that is good gets to hear."
+  {:status 401
+   :headers text-headers
+   :body "Send the header Authorization: Bearer <token>. GET / tells how to get one.\n"})
+
+(defn- file
+  "Answers a request to `/file/<path>`, which needs the bearer token as
+   an evaluation does: a PUT stores the body as the file or as a part
+   of it, a GET sends the file or a range of it, a HEAD its length
+   alone. See `rep.files/store!` and `rep.files/serve`."
+  [w {:keys [request-method] :as request}]
+  (let [path (files/requested request)]
+    (cond
+      (not (authorized? w request))
+      unauthorized
+
+      (not (contains? #{:put :get :head} request-method))
+      (text 405 "PUT or GET.\n")
+
+      (nil? path)
+      (text 403 "Not a path inside the work folder.\n")
+
+      (= :put request-method)
+      (files/store! w request path)
+
+      :else
+      (files/serve w request path))))
 
 (defn- from
   "The byte the caller wants the output from."
@@ -180,8 +204,7 @@
       (text 400 "The body is empty. Send the code to evaluate.\n")
       (let [submitted (evaluation/submit! w {:request/session session
                                              :request/id id
-                                             :request/body body
-                                             :request/base-url (base-url w request)})]
+                                             :request/body body})]
         (case (:submit/answer submitted)
           :conflict
           (text 409 (str "The evaluation id " id " was used for another request. "
@@ -214,9 +237,10 @@
    answers these paths, every other one with a 404:
 
      POST /rep/<session>/<id>   evaluates the body, needs the bearer token
-     PUT  /file/<path>?...      a signed upload into the work folder
-     GET  /file/<path>?...      a signed download out of it, HEAD for
-                                its length alone
+     PUT  /file/<path>          stores the body in the work folder, needs
+                                the bearer token
+     GET  /file/<path>          answers the file, HEAD its length alone,
+                                both need the bearer token
      POST /login                exchanges a login code for a token
      POST /logout               ends the token it is sent with
      GET  /                     the usage text for an agent
@@ -237,10 +261,7 @@
                   shared-image? (str shared-usage)))
 
       (str/starts-with? uri "/file/")
-      (case request-method
-        :put (files/store! w request)
-        (:get :head) (files/fetch w request)
-        (text 405 "PUT or GET.\n"))
+      (file w request)
 
       (= "/login" uri)
       (login w request)
@@ -252,7 +273,7 @@
       (text 404 "Not found. GET / tells how this works.\n")
 
       (not (authorized? w request))
-      (text 401 "Send the header Authorization: Bearer <token>. GET / tells how to get one.\n")
+      unauthorized
 
       (not (and (parse-uuid session) (parse-uuid id)))
       (text 400 "The session and the evaluation id have to be UUIDs.\n")
@@ -271,11 +292,9 @@
    :rep/token         a static bearer token, for tests and automation. Without
                       one, callers log in with a code (see `rep.auth`)
    :rep/secret        the key that signs the tokens, from `REP_SECRET` or kept
-                      in the state folder. `:rep/file-secret`, which signs the
-                      file URLs and is all a session gets, is derived from it
+                      in the state folder
    :rep/code-minutes  how long a login code holds, 10
    :rep/token-days    how long a token holds, 30
-   :rep/public-url    how the outside reaches the server, else from the request
    :rep/prelude       a Clojure file every session loads when it starts, for
                       the functions a host wants to add
    :rep/setup-ms      how long the setup of a fresh process may take, the
@@ -302,8 +321,7 @@
                       comes in parts with `Range`
    :rep/slice-bytes   how much of a file the door holds at a time while a
                       GET fetches it whole, one megabyte, see `rep.door`
-   :rep/url-seconds   how long a signed URL holds
-   :rep/grace-ms      how long a POST waits for the evaluation before it
+   :rep/grace-ms     how long a POST waits for the evaluation before it
                       answers \"running\" and streams
    :rep/keep-days     how many days the request, the output and the outcome
                       of an evaluation stay on disk, 7. The server deletes
@@ -344,10 +362,8 @@
             :rep/state-dir state-dir
             :rep/token (or (:rep/token options) (env "REP_TOKEN"))
             :rep/secret secret
-            :rep/file-secret (auth/file-secret secret)
             :rep/code-minutes 10
             :rep/token-days 30
-            :rep/public-url (env "REP_PUBLIC_URL")
             :rep/prelude (env "REP_PRELUDE")
             :rep/setup-ms session/setup-ms
             :rep/shared-image? (contains? #{"1" "true"} (env "REP_SHARED_IMAGE"))
@@ -359,7 +375,6 @@
             :rep/output-limit (* 10 1024 1024)
             :rep/max-body max-body
             :rep/max-file-mb files/max-file-mb
-            :rep/url-seconds 900
             :rep/grace-ms 1000
             :rep/keep-days evaluation/keep-days
             :rep/lock (Object.)
@@ -411,9 +426,9 @@
       (some-> running :sweeper/stop (deliver true)))))
 
 (defn file-path?
-  "True for the path of a signed file URL. With `:rep/door?` the door
-   answers a GET of such a path itself, so that a file of any size comes
-   down in one request."
+  "True for the path of a file of the work folder, `/file/<path>`. With
+   `:rep/door?` the door answers a GET of such a path itself, so that a
+   file of any size comes down in one request."
   [uri]
   (str/starts-with? (str uri) "/file/"))
 
@@ -486,7 +501,6 @@
   {:port {:coerce :long :desc "Port to listen on (8730)"}
    :ip {:desc "Address to listen on (127.0.0.1)"}
    :dir {:desc "Work folder (work)"}
-   :public-url {:desc "How the outside reaches the server"}
    :prelude {:desc "A Clojure file every session loads when it starts"}
    :class-path {:coerce :string
                 :desc "More paths for the classpath of the sessions, separated by commas"}
@@ -500,13 +514,12 @@
 (defn cli-options
   "The options for `prepare` from the arguments of `bb serve`."
   [args]
-  (let [{:keys [port ip dir public-url prelude class-path shared-image max-body-mb door]}
+  (let [{:keys [port ip dir prelude class-path shared-image max-body-mb door]}
         (cli/parse-opts args {:spec cli-spec})]
     (cond-> {}
       port (assoc :rep/port port)
       ip (assoc :rep/ip ip)
       dir (assoc :rep/dir dir)
-      public-url (assoc :rep/public-url public-url)
       prelude (assoc :rep/prelude prelude)
       class-path (assoc :rep/class-path (vec (remove str/blank? (str/split class-path #","))))
       shared-image (assoc :rep/shared-image? true)
@@ -514,7 +527,7 @@
       door (assoc :rep/door? true))))
 
 (defn -main
-  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--public-url URL] [--prelude FILE]
+  "bb serve [--port 8730] [--ip 127.0.0.1] [--dir work] [--prelude FILE]
             [--class-path PATH,PATH] [--shared-image] [--max-body-mb 32] [--door]"
   [& args]
   (let [w (-> (cli-options args)

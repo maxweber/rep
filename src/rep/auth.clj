@@ -56,12 +56,6 @@
       (fs/set-posix-file-permissions file "rw-------"))
     (str/trim (slurp (fs/file file)))))
 
-(defn file-secret
-  "The key that signs file URLs, derived from `secret`. A session gets
-   this one. Nobody can turn it back into the key that signs tokens."
-  [secret]
-  (files/hmac secret "rep file urls"))
-
 (defn new-code
   "A fresh login code, 60 random bits as three groups of four characters."
   []

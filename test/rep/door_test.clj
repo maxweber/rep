@@ -6,20 +6,17 @@
    2 GB comes in parts."
   (:require [babashka.fs :as fs]
             [babashka.http-client :as http]
-            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http-server]
             [rep.door :as door]
-            [rep.files :as files]
             [rep.files-test :refer [megabyte random-file! sha256]]
             [rep.server :as server]
-            [rep.server-test :as server-test :refer [evaluate uuid with-system wait-until]]))
+            [rep.server-test :as server-test :refer [authorized file-address uuid with-system wait-until]]))
 
-(defn- download-url
-  "A signed URL that gives `path`, asked for the way a caller does."
-  [w path]
-  (edn/read-string (:body (evaluate w (uuid) (str "(download-url " (pr-str path) ")")))))
+(def ^:private bearer
+  "The line of a request's head that carries the token."
+  (str "Authorization: Bearer " server-test/token "\r\n"))
 
 (defn- sparse-file!
   "Makes the file `file` with `bytes` bytes of which only the first and
@@ -97,14 +94,14 @@
       (let [bytes (* 4500 megabyte)
             stored (fs/file (:rep/dir w) "out" "large.bin")
             [first-part last-part] (sparse-file! stored bytes)
-            url (download-url w "out/large.bin")]
+            url (file-address w "out/large.bin")]
         (testing "a HEAD says how long the file is"
-          (let [answer (http/head url {:throw false})]
+          (let [answer (http/head url {:headers authorized :throw false})]
             (is (= 200 (:status answer)))
             (is (= (str bytes) (get (:headers answer) "content-length")))))
         (testing "a file of 4.5 GB comes down in one plain GET, with its Content-Length"
           (let [before (resident-bytes)
-                answer (http/get url {:as :stream :throw false})]
+                answer (http/get url {:headers authorized :as :stream :throw false})]
             (with-open [in (:body answer)]
               (is (= 200 (:status answer)))
               (is (= (str bytes) (get (:headers answer) "content-length")))
@@ -119,7 +116,9 @@
                 (is (< (- (resident-bytes) before) (* 256 megabyte))
                     "the resident memory grew by less than 256 MB for a file of 4500 MB")))))
         (testing "a range of it is answered as before"
-          (let [answer (http/get url {:headers {"Range" (str "bytes=" (- bytes 10) "-")} :as :bytes :throw false})]
+          (let [answer (http/get url {:headers (assoc authorized "Range" (str "bytes=" (- bytes 10) "-"))
+                                       :as :bytes
+                                       :throw false})]
             (is (= 206 (:status answer)))
             (is (= (vec (take-last 10 last-part)) (vec (:body answer))))))))))
 
@@ -133,7 +132,7 @@
           (testing "with a slice of 4 KB a file of 3 MB goes out in several hundred slices and arrives intact"
             (is (= 4096 (:door/slice-bytes (:rep/door w))))
             (let [back (str local ".back")
-                  answer (http/get (download-url w "out/sliced.bin") {:as :stream :throw false})]
+                  answer (http/get (file-address w "out/sliced.bin") {:headers authorized :as :stream :throw false})]
               (try
                 (with-open [in (:body answer)]
                   (fs/copy in back {:replace-existing true}))
@@ -144,7 +143,7 @@
                   (fs/delete-if-exists back)))))
           (testing "an empty file is an answer of no bytes"
             (spit (fs/file (:rep/dir w) "out" "empty.bin") "")
-            (let [answer (http/get (download-url w "out/empty.bin") {:throw false})]
+            (let [answer (http/get (file-address w "out/empty.bin") {:headers authorized :throw false})]
               (is (= 200 (:status answer)))
               (is (= "0" (get (:headers answer) "content-length")))
               (is (= "" (:body answer)))))))
@@ -182,11 +181,10 @@
       (when (fs/exists? "/proc/self/fd")
         (let [stored (fs/file (:rep/dir w) "out" "large.bin")
               _ (sparse-file! stored (* 3000 megabyte))
-              url (download-url w "out/large.bin")
-              target (subs url (str/index-of url "/file/"))
+              target "/file/out/large.bin"
               connections (:door/connections (:rep/door w))
               before (count @connections)
-              socket (raw-request! w (str "GET " target " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))]
+              socket (raw-request! w (str "GET " target " HTTP/1.1\r\nHost: 127.0.0.1\r\n" bearer "\r\n"))]
           (testing "a download is under way: the door has the file open and a connection more"
             (is (= megabyte (alength (read-exactly (.getInputStream socket) megabyte))))
             (is (open-on? stored))
@@ -200,9 +198,7 @@
   (with-system door-on
     (fn [w]
       (spit (fs/file (:rep/dir w) "note.txt") "a note")
-      (let [url (download-url w "note.txt")
-            target (subs url (str/index-of url "/file/"))
-            bearer (str "Authorization: Bearer " server-test/token "\r\n")
+      (let [target "/file/note.txt"
             evaluation (fn [code]
                          (str "POST /rep/" (uuid) "/" (uuid) " HTTP/1.1\r\nHost: 127.0.0.1\r\n" bearer
                               "Content-Length: " (count code) "\r\n\r\n" code))]
@@ -214,13 +210,13 @@
                           (.write out (.getBytes text "ISO-8859-1"))
                           (.flush out))]
               (is (= {:status 200 :body "3\n"} (select-keys (read-answer in) [:status :body])))
-              (send! (str "GET " target " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+              (send! (str "GET " target " HTTP/1.1\r\nHost: 127.0.0.1\r\n" bearer "\r\n"))
               (is (= {:status 200 :body "a note"} (select-keys (read-answer in) [:status :body])))
               (send! (evaluation "(* 2 21)"))
               (is (= {:status 200 :body "42\n"} (select-keys (read-answer in) [:status :body])))
-              (send! (str "GET " target " HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=2-5\r\n\r\n"))
+              (send! (str "GET " target " HTTP/1.1\r\nHost: 127.0.0.1\r\n" bearer "Range: bytes=2-5\r\n\r\n"))
               (is (= {:status 206 :body "note"} (select-keys (read-answer in) [:status :body])))
-              (send! (str "HEAD " target " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"))
+              (send! (str "HEAD " target " HTTP/1.1\r\nHost: 127.0.0.1\r\n" bearer "Connection: close\r\n\r\n"))
               (let [head (loop [text ""]
                            (let [b (.read in)]
                              (if (neg? b)
@@ -241,16 +237,19 @@
             (is (= -1 (.read (.getInputStream socket)))))
           (with-open [socket (raw-request! w (str "GET / HTTP/1.1\r\nX-Long: " (apply str (repeat 70000 "x"))))]
             (is (= 431 (:status (read-answer (.getInputStream socket)))))))
-        (testing "a signed GET without its signature is refused by the handler the door asks"
-          (is (= 403 (:status (http/get (str/replace url #"signature=[^&]+" "signature=wrong") {:throw false})))))))))
+        (testing "a GET without the token, or with a wrong one, is refused by the handler the door asks"
+          (is (= 401 (:status (http/get (file-address w "note.txt") {:throw false}))))
+          (is (= 401 (:status (http/get (file-address w "note.txt") {:headers {"Authorization" "Bearer wrong"}
+                                                                   :throw false}))))
+          (is (= 401 (:status (http/head (file-address w "note.txt") {:throw false})))))))))
 
 (deftest parse-head-test
   (is (= {:door/method "GET"
           :door/version "HTTP/1.1"
           :uri "/file/a%20b.txt"
-          :query-string "expires=1&signature=s"
+          :query-string "offset=0&upload=u"
           :headers {"host" "machine.example" "range" "bytes=0-9" "accept" "a,b"}}
-         (dissoc (door/parse-head (str "GET /file/a%20b.txt?expires=1&signature=s HTTP/1.1\r\n"
+         (dissoc (door/parse-head (str "GET /file/a%20b.txt?offset=0&upload=u HTTP/1.1\r\n"
                                        "Host: machine.example\r\nRange:  bytes=0-9 \r\nAccept: a\r\nAccept: b\r\n\r\n"))
                  :door/head)))
   (is (nil? (:query-string (door/parse-head "GET / HTTP/1.0\r\n\r\n"))))
@@ -263,21 +262,23 @@
   [url first-part]
   (let [bytes (* 2500 megabyte)]
     (testing "a plain GET gets a 400 that names the size and says how to fetch the file, not http-kit's 500"
-      (let [answer (http/get url {:throw false})]
+      (let [answer (http/get url {:headers authorized :throw false})]
         (is (= 400 (:status answer)))
         (is (str/includes? (:body answer) (str "out/large.bin holds " bytes " bytes")))
         (is (str/includes? (:body answer) "above 2 GB in parts only"))
         (is (str/includes? (:body answer) "Range header"))
         (is (str/includes? (:body answer) "curl -r"))))
     (testing "a HEAD gets the status of that GET"
-      (is (= 400 (:status (http/head url {:throw false})))))
+      (is (= 400 (:status (http/head url {:headers authorized :throw false})))))
     (testing "a Range gets its part, from the start and from behind the 2 GB"
-      (let [answer (http/get url {:headers {"Range" "bytes=0-9"} :as :bytes :throw false})]
+      (let [answer (http/get url {:headers (assoc authorized "Range" "bytes=0-9") :as :bytes :throw false})]
         (is (= 206 (:status answer)))
         (is (= (str "bytes 0-9/" bytes) (get (:headers answer) "content-range")))
         (is (= (vec (take 10 first-part)) (vec (:body answer)))))
       (let [start (* 2400 megabyte)
-            answer (http/get url {:headers {"Range" (str "bytes=" start "-" (+ start 9))} :as :bytes :throw false})]
+            answer (http/get url {:headers (assoc authorized "Range" (str "bytes=" start "-" (+ start 9)))
+                                  :as :bytes
+                                  :throw false})]
         (is (= 206 (:status answer)))
         (is (= (str "bytes " start "-" (+ start 9) "/" bytes) (get (:headers answer) "content-range")))
         (is (= (repeat 10 0) (vec (:body answer))))))))
@@ -298,15 +299,15 @@
         (is (= (:rep/port w) (http-server/server-port (:rep/server w)))))
       (testing "a file below 2 GB comes whole in one GET, with its length"
         (spit (fs/file (:rep/dir w) "note.txt") "a note")
-        (let [answer (http/get (download-url w "note.txt") {:throw false})]
+        (let [answer (http/get (file-address w "note.txt") {:headers authorized :throw false})]
           (is (= 200 (:status answer)))
           (is (= "6" (get (:headers answer) "content-length")))
           (is (= "a note" (:body answer))))
-        (let [answer (http/head (download-url w "note.txt") {:throw false})]
+        (let [answer (http/head (file-address w "note.txt") {:headers authorized :throw false})]
           (is (= 200 (:status answer)))
           (is (= "6" (get (:headers answer) "content-length")))))
       (let [[first-part _] (sparse-file! (fs/file (:rep/dir w) "out" "large.bin") (* 2500 megabyte))]
-        (above-two-gigabytes-test (download-url w "out/large.bin") first-part)))))
+        (above-two-gigabytes-test (file-address w "out/large.bin") first-part)))))
 
 (deftest host-without-the-door-test
   (testing "a host that mounts the handler in its own http-kit answers the same"
@@ -315,8 +316,7 @@
           host (http-server/run-server (fn [request] (server/handle system request))
                                        {:port 0 :ip "127.0.0.1" :legacy-return-value? false})
           [first-part _] (sparse-file! (fs/file folder "out" "large.bin") (* 2500 megabyte))
-          url (files/url system {:url/method "GET" :url/path "out/large.bin" :url/seconds 60
-                                 :url/base (str "http://127.0.0.1:" (http-server/server-port host))})]
+          url (str "http://127.0.0.1:" (http-server/server-port host) "/file/out/large.bin")]
       (try
         (above-two-gigabytes-test url first-part)
         (finally

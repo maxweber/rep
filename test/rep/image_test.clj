@@ -2,7 +2,6 @@
   (:require [babashka.fs :as fs]
             [babashka.http-client :as http]
             [babashka.process :as process]
-            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [org.httpkit.server :as http-server]
@@ -297,29 +296,6 @@
       (finally
         (fs/delete prelude)))))
 
-(deftest base-url-test
-  (with-image {:rep/grace-ms 5000}
-    (fn [w]
-      (let [port (:rep/port w)
-            ask (fn [host code]
-                  (http/post (str "http://" host ":" port "/rep/" (uuid) "/" (uuid))
-                             {:headers {"Authorization" (str "Bearer " server-test/token)}
-                              :body code
-                              :throw false}))
-            slow (future (ask "localhost" "(Thread/sleep 600) (upload-url \"in/a.txt\")"))
-            _ (Thread/sleep 200)
-            quick (ask "127.0.0.1" "(upload-url \"in/a.txt\")")]
-        (testing "two callers that reach the shared image under two addresses each get their own in a URL"
-          (is (str/starts-with? (:body quick) (str "\"http://127.0.0.1:" port "/file/in/a.txt?")))
-          (is (str/starts-with? (:body @slow) (str "\"http://localhost:" port "/file/in/a.txt?"))
-              "the caller that asked while another one evaluated"))
-        (testing "a future keeps the address of the evaluation that started it"
-          (is (str/starts-with? (:body (ask "localhost" "@(future (download-url \"in/a.txt\"))"))
-                                (str "\"http://localhost:" port "/file/in/a.txt?"))))
-        (testing "the host's own evaluations have no caller, their URLs have no address"
-          (is (str/starts-with? (:value (image/evaluate w "(upload-url \"in/a.txt\")"))
-                                "\"/file/in/a.txt?")))))))
-
 (deftest evaluate-test
   (with-image {}
     (fn [w]
@@ -579,10 +555,10 @@
         (testing "rep answers the rest: evaluations, the login, files"
           (is (= "3\n" (:body (evaluate w (uuid) "(+ 1 2)"))))
           (is (= 405 (:status (http/get (server-test/address w "/login") {:throw false}))))
-          (let [upload (edn/read-string (:body (evaluate w (uuid) "(upload-url \"in/a.txt\")")))]
-            (is (str/starts-with? upload (server-test/address w "/file/in/a.txt")))
-            (is (= 201 (:status (http/put upload {:body "text" :throw false}))))
-            (is (= "\"text\"" (:value (image/evaluate w "(slurp \"in/a.txt\")"))))))
+          (is (= 401 (:status (http/put (server-test/file-address w "in/a.txt") {:body "text" :throw false}))))
+          (is (= 201 (:status (http/put (server-test/file-address w "in/a.txt")
+                                        {:headers server-test/authorized :body "text" :throw false}))))
+          (is (= "\"text\"" (:value (image/evaluate w "(slurp \"in/a.txt\")")))))
         (finally
           (http-server/server-stop! host)
           (server/stop! w)

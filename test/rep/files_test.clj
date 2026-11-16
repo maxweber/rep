@@ -1,14 +1,14 @@
 (ns rep.files-test
   "Files that are larger than one request: a body the server refuses,
-   an upload and a download in parts, and the offsets of a part."
+   an upload and a download in parts, and the offsets of a part. And
+   where a path may lead."
   (:require [babashka.fs :as fs]
             [babashka.http-client :as http]
-            [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [rep.files :as files]
             [rep.server :as server]
-            [rep.server-test :as server-test :refer [evaluate uuid with-system]]))
+            [rep.server-test :as server-test :refer [authorized evaluate file-address uuid with-system]]))
 
 (def megabyte
   (* 1024 1024))
@@ -41,22 +41,18 @@
           (recur (- left megabyte)))))
     file))
 
-(defn- upload-url
-  "A signed URL that takes `path`, asked for the way a caller does."
-  [w path]
-  (edn/read-string (:body (evaluate w (uuid) (str "(upload-url " (pr-str path) ")")))))
-
-(defn- download-url
-  "A signed URL that gives `path`, asked for the way a caller does."
-  [w path]
-  (edn/read-string (:body (evaluate w (uuid) (str "(download-url " (pr-str path) ")")))))
-
 (defn- put
-  "PUTs `body` to the signed URL, as the part at `offset` when given."
+  "PUTs `body` to the address of a file with the token, as the part at
+   `offset` when given."
   ([url body]
-   (http/put url {:body body :throw false}))
+   (http/put url {:headers authorized :body body :throw false}))
   ([url body offset]
-   (http/put (str url "&offset=" offset) {:body body :throw false})))
+   (http/put (str url "?offset=" offset) {:headers authorized :body body :throw false})))
+
+(defn- fetch
+  "GETs the address of a file with the token."
+  [url]
+  (http/get url {:headers authorized :throw false}))
 
 (defn- size-header
   [response]
@@ -84,7 +80,9 @@
   [url back]
   (with-open [out (java.io.FileOutputStream. (str back))]
     (loop [offset 0]
-      (let [answer (http/get url {:headers {"Range" (str "bytes=" offset "-")} :as :bytes :throw false})
+      (let [answer (http/get url {:headers (assoc authorized "Range" (str "bytes=" offset "-"))
+                                  :as :bytes
+                                  :throw false})
             total (parse-long (second (re-find #"/(\d+)$" (get (:headers answer) "content-range"))))
             end (+ offset (alength (:body answer)))]
         (.write out ^bytes (:body answer))
@@ -97,42 +95,53 @@
     (fn [w]
       (let [work (:rep/dir w)
             session (uuid)
-            url-for (fn [function path]
-                      (edn/read-string (:body (evaluate w session (str "(" function " " (pr-str path) ")")))))
-            secret (slurp (fs/file (:rep/state-dir w) "secret"))]
+            id (uuid)
+            kept "another caller's output"
+            output (fs/file (:rep/state-dir w) "sessions" session id "output")]
+        (evaluate w session (str "(print " (pr-str kept) ")") {:id id})
+        (is (= kept (slurp output)) "rep keeps what an evaluation printed in its state folder")
         (fs/create-dirs (fs/path work "in"))
         (spit (fs/file work "in" "real.txt") "a real file")
-        (fs/create-sym-link (fs/path work "in" "file-link") (fs/path ".." ".rep" "secret"))
+        (fs/create-sym-link (fs/path work "in" "file-link") (fs/path ".." ".rep" "sessions" session id "output"))
         (fs/create-sym-link (fs/path work "in" "folder-link") (fs/path ".." ".rep"))
         (fs/create-sym-link (fs/path work "in" "inside-link") "real.txt")
         (fs/create-sym-link (fs/path work "in" "nowhere-link") (fs/path ".." ".rep" "not-there-yet"))
-        (testing "a link inside the work folder to a file of the state folder is refused, the signing key stays in"
-          (let [answer (http/get (url-for "download-url" "in/file-link") {:throw false})]
+        (testing "a link inside the work folder to a file of the state folder is refused, what rep keeps stays in"
+          (let [answer (fetch (file-address w "in/file-link"))]
             (is (= 403 (:status answer)))
-            (is (not (str/includes? (:body answer) secret)))))
+            (is (not (str/includes? (:body answer) kept)))))
         (testing "so is a path through a link to the state folder itself"
-          (let [answer (http/get (url-for "download-url" "in/folder-link/secret") {:throw false})]
+          (let [answer (fetch (file-address w (str "in/folder-link/sessions/" session "/" id "/output")))]
             (is (= 403 (:status answer)))
-            (is (not (str/includes? (:body answer) secret))))
-          (is (= 403 (:status (http/get (url-for "download-url" "in/folder-link/tokens") {:throw false})))))
+            (is (not (str/includes? (:body answer) kept))))
+          (is (= 403 (:status (fetch (file-address w "in/folder-link/sessions"))))))
         (testing "a write through such a link is refused and changes nothing"
-          (is (= 403 (:status (http/put (url-for "upload-url" "in/file-link") {:body "overwritten" :throw false}))))
-          (is (= 403 (:status (http/put (url-for "upload-url" "in/folder-link/planted") {:body "planted" :throw false}))))
-          (is (= 403 (:status (http/put (str (url-for "upload-url" "in/folder-link/planted") "&offset=0&upload=x")
-                                        {:body "planted" :throw false}))))
-          (is (= secret (slurp (fs/file (:rep/state-dir w) "secret"))))
+          (is (= 403 (:status (put (file-address w "in/file-link") "overwritten"))))
+          (is (= 403 (:status (put (file-address w "in/folder-link/planted") "planted"))))
+          (is (= 403 (:status (http/put (str (file-address w "in/folder-link/planted") "?offset=0&upload=x")
+                                        {:headers authorized :body "planted" :throw false}))))
+          (is (= kept (slurp output)))
           (is (not (fs/exists? (fs/path (:rep/state-dir w) "planted")))))
         (testing "a link that leads nowhere is refused, a write through it would make a file where it points"
-          (is (= 403 (:status (http/put (url-for "upload-url" "in/nowhere-link") {:body "x" :throw false}))))
+          (is (= 403 (:status (put (file-address w "in/nowhere-link") "x"))))
           (is (not (fs/exists? (fs/path (:rep/state-dir w) "not-there-yet")))))
         (testing "a link that stays inside the work folder works as before"
-          (is (= "a real file" (:body (http/get (url-for "download-url" "in/inside-link") {:throw false}))))
-          (is (= 201 (:status (http/put (url-for "upload-url" "in/inside-link") {:body "written through" :throw false}))))
+          (is (= "a real file" (:body (fetch (file-address w "in/inside-link")))))
+          (is (= 201 (:status (put (file-address w "in/inside-link") "written through"))))
           (is (= "written through" (slurp (fs/file work "in" "real.txt")))))
         (testing "a link that leads out of the work folder is refused, as before"
           (fs/create-sym-link (fs/path work "in" "way-out") (fs/parent work))
-          (is (= 403 (:status (http/get (url-for "download-url" "in/way-out/anything") {:throw false}))))
-          (is (= 403 (:status (http/put (url-for "upload-url" "in/way-out/planted.txt") {:body "x" :throw false})))))))))
+          (is (= 403 (:status (fetch (file-address w "in/way-out/anything")))))
+          (is (= 403 (:status (put (file-address w "in/way-out/planted.txt") "x")))))))))
+
+(deftest requested-test
+  (testing "the path of a request, cleaned"
+    (is (= "in/clip one+two.txt" (files/requested {:uri "/file/in/clip%20one+two.txt"})))
+    (is (= "b.txt" (files/requested {:uri "/file/a/../b.txt"}))))
+  (testing "nil for a path that leaves the work folder, points into .rep or is no path at all"
+    (doseq [uri ["/file/" "/file/../x" "/file/%2E%2E/x" "/file/a/../../x" "/file//etc/passwd" "/file/%2Fetc%2Fpasswd"
+                 "/file/.rep/sessions" "/file/a/../.rep" "/file/a%5Cb" "/file/%zz"]]
+      (is (nil? (files/requested {:uri uri})) uri))))
 
 (deftest max-body-test
   (with-system {:rep/max-body (* 64 1024)}
@@ -168,19 +177,19 @@
           (let [stored (fs/file (:rep/dir w) "in" "big.bin")]
             (testing "one request cannot carry the file"
               (let [answer (try
-                             (put (upload-url w "in/whole.bin") (fs/file local))
+                             (put (file-address w "in/whole.bin") (fs/file local))
                              (catch java.io.IOException e e))]
                 (is (or (instance? java.io.IOException answer) (= 413 (:status answer))))
                 (is (not (fs/exists? (fs/file (:rep/dir w) "in" "whole.bin"))))))
             (testing "20 MB go up in parts of 8 MB and arrive intact"
-              (is (= (* 20 megabyte) (put-parts! (upload-url w "in/big.bin") local (* 8 megabyte))))
+              (is (= (* 20 megabyte) (put-parts! (file-address w "in/big.bin") local (* 8 megabyte))))
               (is (= (* 20 megabyte) (fs/size stored)))
               (is (= (sha256 local) (sha256 stored))))
             (testing "and come back in parts, 8 MB a range"
-              (is (= (* 20 megabyte) (get-parts! (download-url w "in/big.bin") back)))
+              (is (= (* 20 megabyte) (get-parts! (file-address w "in/big.bin") back)))
               (is (= (sha256 local) (sha256 back))))
             (testing "the same upload again starts the file over, it does not append"
-              (is (= (* 20 megabyte) (put-parts! (upload-url w "in/big.bin") local (* 8 megabyte))))
+              (is (= (* 20 megabyte) (put-parts! (file-address w "in/big.bin") local (* 8 megabyte))))
               (is (= (sha256 local) (sha256 stored)))))))
       (finally
         (fs/delete-if-exists local)
@@ -189,7 +198,7 @@
 (deftest offset-test
   (with-system {}
     (fn [w]
-      (let [url (upload-url w "in/parts.txt")
+      (let [url (file-address w "in/parts.txt")
             stored (fs/file (:rep/dir w) "in" "parts.txt")]
         (testing "offset 0 starts the file, the answer says how many bytes it holds"
           (let [answer (put url "hello " 0)]
@@ -223,16 +232,17 @@
         (testing "an empty part at offset 0 makes an empty file"
           (is (= "0" (size-header (put url "" 0))))
           (is (= "" (slurp stored))))
-        (testing "the offset does not get a part past the signature"
-          (is (= 403 (:status (put (str/replace url "parts.txt" "other.txt") "x" 0)))))))))
+        (testing "a part without the token is refused and changes nothing"
+          (is (= 401 (:status (http/put (str url "?offset=0") {:body "x" :throw false}))))
+          (is (= "" (slurp stored))))))))
 
 (deftest range-test
   (with-system {}
     (fn [w]
       (spit (fs/file (:rep/dir w) "letters.txt") "abcdefghij")
-      (let [url (edn/read-string (:body (evaluate w (uuid) "(download-url \"letters.txt\")")))
+      (let [url (file-address w "letters.txt")
             ask (fn [range]
-                  (http/get url {:headers {"Range" range} :throw false}))]
+                  (http/get url {:headers (assoc authorized "Range" range) :throw false}))]
         (testing "a range answers 206 with that part and the size of the file"
           (let [answer (ask "bytes=2-5")]
             (is (= 206 (:status answer)))
@@ -254,7 +264,7 @@
         (testing "an end that is too large a number counts as the end of the file"
           (is (= "ij" (:body (ask "bytes=8-99999999999999999999")))))
         (testing "without the header the whole file comes, as before"
-          (let [answer (http/get url {:throw false})]
+          (let [answer (fetch url)]
             (is (= 200 (:status answer)))
             (is (= "abcdefghij" (:body answer)))))))))
 
@@ -273,7 +283,7 @@
 (deftest max-file-test
   (with-system {:rep/max-file-mb 1}
     (fn [w]
-      (let [url (upload-url w "in/grows.bin")
+      (let [url (file-address w "in/grows.bin")
             stored (fs/file (:rep/dir w) "in" "grows.bin")
             part (byte-array (* 700 1024))]
         (testing "a file grows through its parts up to :rep/max-file-mb"
@@ -301,25 +311,24 @@
   ([url body offset id]
    (put-as url body offset id nil))
   ([url body offset id more]
-   (http/put (str url "&offset=" offset "&upload=" id more) {:body body :throw false})))
+   (http/put (str url "?offset=" offset "&upload=" id more) {:headers authorized :body body :throw false})))
 
 (defn- stored-at
   "Hands the part `body` of the upload `id` at `offset` to `store!`
-   itself, with the clock at `now-ms`. `url` is a signed URL of the
-   system `w`. Answers the status."
+   itself, with the clock at `now-ms`. `url` is the address of a file
+   of the system `w`. Answers the status."
   [w url body offset id now-ms]
-  (let [[_ uri query] (re-find #"^https?://[^/]+(/[^?]*)\?(.*)$" url)]
-    (:status (files/store! (assoc w :rep/now-ms now-ms)
-                           {:request-method :put
-                            :uri uri
-                            :query-string (str query "&offset=" offset (when id (str "&upload=" id)))
-                            :headers {}
-                            :body (java.io.ByteArrayInputStream. (.getBytes body "UTF-8"))}))))
+  (let [request {:request-method :put
+                 :uri (second (re-find #"^https?://[^/]+(/.*)$" url))
+                 :query-string (str "offset=" offset (when id (str "&upload=" id)))
+                 :headers {}
+                 :body (java.io.ByteArrayInputStream. (.getBytes body "UTF-8"))}]
+    (:status (files/store! (assoc w :rep/now-ms now-ms) request (files/requested request)))))
 
 (deftest upload-id-test
   (with-system {}
     (fn [w]
-      (let [url (upload-url w "in/shared.txt")
+      (let [url (file-address w "in/shared.txt")
             stored (fs/file (:rep/dir w) "in" "shared.txt")
             refused? (fn [answer start]
                        (and (= 409 (:status answer))
@@ -357,7 +366,7 @@
   (testing "a part with an id above offset 0 needs a record with that id: a file without a record refuses it"
     (with-system {}
       (fn [w]
-        (let [url (upload-url w "in/plain.txt")
+        (let [url (file-address w "in/plain.txt")
               stored (fs/file (:rep/dir w) "in" "plain.txt")]
           (is (= 201 (:status (put url "aaa" 0))) "a part without an id, and so without a record")
           (is (= 201 (:status (put url "aaa" 3))) "which goes on as before while no upload is on record")
@@ -373,7 +382,7 @@
   (testing "an upload that sent no part for 15 minutes is over"
     (with-system {}
       (fn [w]
-        (let [url (upload-url w "in/idle.txt")
+        (let [url (file-address w "in/idle.txt")
               stored (fs/file (:rep/dir w) "in" "idle.txt")
               now (System/currentTimeMillis)
               minutes #(+ now (* % 60 1000))]
@@ -390,4 +399,3 @@
             (is (= 0 (files/forget-uploads! (assoc w :rep/now-ms (minutes 50)))))
             (is (= 1 (files/forget-uploads! (assoc w :rep/now-ms (minutes 56)))))
             (is (empty? (fs/list-dir (fs/path (:rep/state-dir w) "uploads"))))))))))
-

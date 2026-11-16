@@ -1,14 +1,16 @@
 (ns rep.files
-  "The work folder, and signed URLs that move one file into it or out of
-   it. A signed URL needs no token. Its signature names the method, the
-   path and the moment it expires, so it can be handed to another tool.
+  "The work folder, and the two requests that move one file into it or
+   out of it: `PUT /file/<path>` and `GET /file/<path>`. Who may send
+   them is not decided here. The server checks the bearer token first
+   (`rep.server/handle`), a host that serves files under a credential
+   of its own checks that, and both then call `store!` and `serve`.
 
    The server holds a request body in memory and refuses one above
    `:rep/max-body`. So a large file comes in parts, each a PUT to the
-   same signed URL with `&offset=<bytes so far>`, and goes out in parts
-   with the `Range` header. The sender of the parts names its upload
-   with `&upload=<id>`, so that a second sender of the same path is
-   told and does not mix its parts in."
+   same path with `?offset=<bytes so far>`, and goes out in parts with
+   the `Range` header. The sender of the parts names its upload with
+   `&upload=<id>`, so that a second sender of the same path is told
+   and does not mix its parts in."
   (:require [babashka.fs :as fs]
             [clojure.java.io :as io]
             [clojure.string :as str]))
@@ -31,8 +33,9 @@
           clean)))))
 
 (defn- state-folder
-  "The folder rep keeps its own files in, the signing key among them:
-   `:rep/state-dir`, or `.rep` in the work folder without it."
+  "The folder rep keeps its own files in, the code and the output of
+   every caller's evaluations: `:rep/state-dir`, or `.rep` in the work
+   folder without it."
   [{:rep/keys [dir state-dir]}]
   (or state-dir (fs/path dir ".rep")))
 
@@ -66,8 +69,8 @@
   "The file of `path` in the work folder `:rep/dir`. Throws for a path
    that `relative` refuses, and for one that resolves, through a link,
    to a place outside the work folder or inside rep's state folder.
-   The signed routes and a host's own file route (`serve`) come through
-   here."
+   `store!` and `serve` come through here, so rep's own routes and a
+   host's."
   [{:rep/keys [dir] :as w} path]
   (let [clean (relative path)
         target (when clean (fs/path dir clean))]
@@ -84,43 +87,12 @@
     (.encodeToString (.withoutPadding (java.util.Base64/getUrlEncoder))
                      (.doFinal mac (.getBytes (str text) "UTF-8")))))
 
-(defn signature
-  "What signs `method` on `path` until the second `expires`, under the
-   key `:rep/file-secret`."
-  [{:rep/keys [file-secret]} method path expires]
-  (hmac file-secret (str method "\n" path "\n" expires)))
-
-(defn encode
-  "`path` for a URL, segment by segment."
-  [path]
-  (->> (str/split path #"/")
-       (map #(str/replace (java.net.URLEncoder/encode % "UTF-8") "+" "%20"))
-       (str/join "/")))
-
 (defn decode
   "The path of a URL back as text. A plus sign stays a plus sign."
   [encoded]
   (->> (str/split encoded #"/")
        (map #(java.net.URLDecoder/decode (str/replace % "+" "%2B") "UTF-8"))
        (str/join "/")))
-
-(defn now
-  "The current time in seconds."
-  []
-  (quot (System/currentTimeMillis) 1000))
-
-(defn url
-  "A URL that allows `:url/method` (\"PUT\" or \"GET\") on `:url/path` for
-   `:url/seconds` from now. `:url/base` is where the server is reached."
-  [w {:url/keys [method path seconds base]}]
-  (let [clean (relative path)
-        expires (+ (now) seconds)]
-    (when-not clean
-      (throw (ex-info (str "Not a path inside the work folder: " (pr-str path))
-                      {:rep/error :path})))
-    (str base "/file/" (encode clean)
-         "?expires=" expires
-         "&signature=" (signature w method clean expires))))
 
 (defn query
   "The parameters of a query string as a map of strings."
@@ -131,37 +103,14 @@
               :when (seq k)]
           [k (java.net.URLDecoder/decode (or v "") "UTF-8")])))
 
-(defn- same?
-  "Compares two strings in constant time."
-  [a b]
-  (java.security.MessageDigest/isEqual (.getBytes (str a) "UTF-8")
-                                       (.getBytes (str b) "UTF-8")))
-
-(defn check
-  "Reads a request to `/file/<path>` and adds `:file/path` when its
-   signature holds, else `:file/refused` with the reason. A HEAD goes by
-   the signature of a GET: it tells the length of what a GET would
-   give."
-  [w {:keys [request-method uri query-string]}]
-  (let [method (if (= :head request-method)
-                 "GET"
-                 (str/upper-case (name request-method)))
-        path (relative (decode (subs uri (count "/file/"))))
-        parameters (query query-string)
-        given (get parameters "signature")
-        expires (some-> (get parameters "expires") parse-long)]
-    (cond
-      (not path)
-      (assoc w :file/refused "Not a path inside the work folder.")
-
-      (not (and expires given (same? given (signature w method path expires))))
-      (assoc w :file/refused "The signature does not fit this method and path.")
-
-      (< expires (now))
-      (assoc w :file/refused "The URL has expired.")
-
-      :else
-      (assoc w :file/path path))))
+(defn requested
+  "The path that a request to `/file/<path>` names, as `relative`
+   cleans it, or nil for a path that it refuses. This looks at the name
+   only: `store!` and `serve` look at where the path leads."
+  [{:keys [uri]}]
+  (try
+    (relative (decode (subs (str uri) (count "/file/"))))
+    (catch IllegalArgumentException _ nil)))
 
 (def size-header
   "The header that tells how many bytes the file holds, on the answer
@@ -188,8 +137,8 @@
 
 (def max-file-mb
   "How large a file may grow through its parts when the system names no
-   `:rep/max-file-mb`: 4096 megabytes. A signed URL for a PUT is good
-   for many parts, so without a limit it could fill the disk."
+   `:rep/max-file-mb`: 4096 megabytes. A path takes one part after the
+   other, so without a limit a file could fill the disk."
   4096)
 
 (defonce ^{:private true
@@ -200,9 +149,8 @@
 
 (def upload-idle-ms
   "How long an upload may send no part before it counts as over: 15
-   minutes, as long as a signed URL holds. Its record is no record from
-   then on, so that an upload that ended, or was given up, does not keep
-   the file to itself."
+   minutes. Its record is no record from then on, so that an upload
+   that ended, or was given up, does not keep the file to itself."
   (* 15 60 1000))
 
 (defn- upload-record
@@ -319,8 +267,12 @@
       0))
 
 (defn store!
-  "Answers a signed PUT. Without `offset` in the query the body becomes
-   the file. With `?offset=<n>` the body is one part of the file, for a
+  "Answers a PUT of the file at `path` of the work folder, for a caller
+   that has checked who asks: the server after the bearer token, a host
+   after a credential of its own. The path gets the checks of `file`.
+
+   Without `offset` in the query the body becomes the file, and a path
+   that `file` refuses is a 403. With `?offset=<n>` the body is one part of the file, for a
    file that is too large for one request: offset 0 starts the file
    over, the file's own size appends, and any other offset is a 409
    that changes nothing. Every answer to a part that was stored or that
@@ -342,14 +294,10 @@
    upload that sent no part for 15 minutes is over and off the record.
    While no upload is on record, a part without an id is taken as
    before."
-  [w {:keys [body query-string] :as request}]
-  (let [{:file/keys [path refused] :as w} (check w request)
-        {:strs [upload resume] given "offset"} (query query-string)
+  [w {:keys [body query-string] :as request} path]
+  (let [{:strs [upload resume] given "offset"} (query query-string)
         offset (if given (parse-long given) 0)]
     (cond
-      refused
-      (text 403 (str refused "\n"))
-
       (not (and offset (not (neg? offset))))
       (text 400 "The offset has to be a number of bytes, 0 or more.\n")
 
@@ -429,8 +377,8 @@
 
 (defn serve
   "Answers `request` with the file at `path` of the work folder
-   `:rep/dir`, for a caller that has checked who asks: `fetch` after the
-   signature, a host after a credential of its own. The path gets the
+   `:rep/dir`, for a caller that has checked who asks: the server after
+   the bearer token, a host after a credential of its own. The path gets the
    checks of `file`. With a `Range` header it answers 206 and that part
    of the file, at most `range-bytes` of it, and `Content-Range` says
    which bytes came and how many the file has. Else it answers
@@ -491,21 +439,11 @@
            :headers headers
            :body target})))))
 
-(defn fetch
-  "Answers a signed GET with the file, see `serve`: the whole file, or
-   with a `Range` header a part of it."
-  [w request]
-  (let [{:file/keys [path refused] :as w} (check w request)]
-    (if refused
-      (text 403 (str refused "\n"))
-      (serve w request path))))
-
 (comment
-  (def w {:rep/dir "work" :rep/file-secret "secret"})
+  (def w {:rep/dir "work"})
   (relative "a/../b.txt")
   (relative "../b.txt")
-  (url w {:url/method "PUT" :url/path "in/clip one.mp4" :url/seconds 900
-          :url/base "http://127.0.0.1:8730"})
+  (requested {:uri "/file/in/clip%20one.mp4"})
   (byte-range "bytes=0-99" 1000)
   (byte-range "bytes=900-" 1000)
   (byte-range "bytes=1000-" 1000)

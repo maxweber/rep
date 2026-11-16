@@ -444,7 +444,7 @@
                      :door/own? #(str/starts-with? % "/file/")}))
   ;; curl -sI http://127.0.0.1:8732/file/x    answered by the door
   ;; curl -s  http://127.0.0.1:8732/other     passed on to http-kit
-  (parse-head "GET /file/a%20b?expires=1 HTTP/1.1\r\nHost: x\r\nRange: bytes=0-9\r\n\r\n")
+  (parse-head "GET /file/a%20b?offset=0 HTTP/1.1\r\nHost: x\r\nRange: bytes=0-9\r\n\r\n")
   (count @(:door/connections door))
   (stop! door)
   (http/server-stop! inner))

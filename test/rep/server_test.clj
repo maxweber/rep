@@ -31,6 +31,15 @@
   [w & parts]
   (apply str "http://127.0.0.1:" (:rep/port w) parts))
 
+(def authorized
+  "The header every request to rep carries."
+  {"Authorization" (str "Bearer " token)})
+
+(defn file-address
+  "Where the file at `path` of the work folder is put and fetched."
+  [w path]
+  (address w "/file/" path))
+
 (defn uuid
   []
   (str (random-uuid)))
@@ -147,12 +156,12 @@
       (testing "with-out-str keeps the output as a string"
         (is (= "\"captured\\n\"\n" (:body (evaluate w (uuid) "(with-out-str (sh \"echo captured\"))")))))
       (testing "a script uploaded as a file runs without any quoting"
-        (let [session (uuid)
-              upload (edn/read-string (:body (evaluate w session "(upload-url \"scripts/run.sh\")")))]
-          (is (= 201 (:status (http/put upload {:body "echo \"it's $((1+2)) \\\"quoted\\\"\"\nexit 4\n"
-                                                :throw false}))))
-          (is (= "it's 3 \"quoted\"\n{:exit 4}\n"
-                 (:body (evaluate w session "(sh \"bash scripts/run.sh\")"))))))
+        (is (= 201 (:status (http/put (file-address w "scripts/run.sh")
+                                      {:headers authorized
+                                       :body "echo \"it's $((1+2)) \\\"quoted\\\"\"\nexit 4\n"
+                                       :throw false}))))
+        (is (= "it's 3 \"quoted\"\n{:exit 4}\n"
+               (:body (evaluate w (uuid) "(sh \"bash scripts/run.sh\")")))))
       (testing "bash runs in the work folder"
         (is (= (str (fs/real-path (:rep/dir w)) "\n{:exit 0}\n")
                (:body (evaluate w (uuid) (bash "pwd -P")))))))))
@@ -243,29 +252,36 @@
   (with-system {}
     (fn [w]
       (let [session (uuid)
-            read-url (fn [code]
-                       (edn/read-string (:body (evaluate w session code))))
-            upload (read-url "(upload-url \"in/clip one+two.txt\")")
-            stored (http/put upload {:body "the footage" :throw false})]
-        (is (str/includes? upload "/file/in/clip%20one%2Btwo.txt?expires="))
-        (is (= 201 (:status stored)))
-        (is (= "the footage" (slurp (fs/file (:rep/dir w) "in" "clip one+two.txt"))))
-        (is (= "\"the footage\"\n" (:body (evaluate w session "(slurp \"in/clip one+two.txt\")"))))
-        (testing "a download URL answers the file without a token"
-          (let [download (read-url "(download-url \"in/clip one+two.txt\")")]
-            (is (= "the footage" (:body (http/get download {:throw false}))))
-            (testing "but not another method, path or signature"
-              (is (= 403 (:status (http/put download {:body "x" :throw false}))))
-              (is (= 403 (:status (http/get (str/replace download "one%2Btwo" "three") {:throw false}))))
-              (is (= 403 (:status (http/get (str download "x") {:throw false})))))))
-        (testing "an expired URL is refused"
-          (is (= 403 (:status (http/get (read-url "(download-url \"in/clip one+two.txt\" -1)")
-                                        {:throw false})))))
-        (testing "no URL for a path outside the work folder or into .rep"
-          (is (= "failed" (get (:headers (evaluate w session "(upload-url \"../x\")")) "rep-status")))
-          (is (= "failed" (get (:headers (evaluate w session "(download-url \".rep/sessions\")")) "rep-status"))))
+            clip (file-address w "in/clip%20one%2Btwo.txt")
+            stored (http/put clip {:headers authorized :body "the footage" :throw false})]
+        (testing "a PUT with the token stores the body as the file"
+          (is (= 201 (:status stored)))
+          (is (= "the footage" (slurp (fs/file (:rep/dir w) "in" "clip one+two.txt"))))
+          (is (= "\"the footage\"\n" (:body (evaluate w session "(slurp \"in/clip one+two.txt\")")))))
+        (testing "a GET with the token answers it, a HEAD its length"
+          (is (= "the footage" (:body (http/get clip {:headers authorized :throw false}))))
+          (is (= "11" (get (:headers (http/head clip {:headers authorized :throw false})) "content-length"))))
+        (testing "without the token, or with a wrong one, nothing is told and nothing is written"
+          (doseq [headers [{} {"Authorization" "Bearer wrong"} {"Authorization" token}]]
+            (is (= 401 (:status (http/get clip {:headers headers :throw false}))))
+            (is (= 401 (:status (http/head clip {:headers headers :throw false}))))
+            (is (= 401 (:status (http/get (file-address w "nothing.txt") {:headers headers :throw false})))
+                "a file that is not there answers the same")
+            (is (= 401 (:status (http/put clip {:headers headers :body "x" :throw false})))))
+          (is (= "the footage" (slurp (fs/file (:rep/dir w) "in" "clip one+two.txt")))))
+        (testing "the token in the query is no token"
+          (is (= 401 (:status (http/get (str clip "?token=" token "&access_token=" token) {:throw false})))))
+        (testing "no way out of the work folder or into .rep"
+          (doseq [path ["%2E%2E/escaped.txt" "in/%2E%2E/%2E%2E/escaped.txt" "in%2F..%2F..%2Fescaped.txt"
+                        ".rep/sessions" "in/%2E%2E/.rep/sessions" "%2Fetc%2Fpasswd"]]
+            (is (= 403 (:status (http/get (file-address w path) {:headers authorized :throw false}))) path)
+            (is (= 403 (:status (http/put (file-address w path) {:headers authorized :body "x" :throw false}))) path))
+          (is (not (fs/exists? (fs/path (fs/parent (:rep/dir w)) "escaped.txt")))))
         (testing "a missing file"
-          (is (= 404 (:status (http/get (read-url "(download-url \"nothing.txt\")") {:throw false})))))))))
+          (is (= 404 (:status (http/get (file-address w "nothing.txt") {:headers authorized :throw false})))))
+        (testing "PUT and GET are the only ways"
+          (is (= 405 (:status (http/delete clip {:headers authorized :throw false}))))
+          (is (= 405 (:status (http/post clip {:headers authorized :body "x" :throw false})))))))))
 
 (deftest access-test
   (with-system {}
@@ -582,13 +598,8 @@
 (deftest session-keys-test
   (with-system {}
     (fn [w]
-      (testing "a session gets the key for file URLs, not the one that signs tokens, and no token"
-        (is (not= (:rep/secret w) (:rep/file-secret w)))
-        (is (= (pr-str [nil nil (:rep/file-secret w)])
-               (str/trim (:body (evaluate w (uuid) "[(System/getenv \"REP_TOKEN\") (System/getenv \"REP_SECRET\") (:secret @rep.prelude/config)]")))))
+      (testing "a session gets neither the key that signs tokens nor a token"
+        (is (= (pr-str [nil nil])
+               (str/trim (:body (evaluate w (uuid) "[(System/getenv \"REP_TOKEN\") (System/getenv \"REP_SECRET\")]")))))
         (is (not (str/includes? (:body (evaluate w (uuid) "(pr-str @rep.prelude/config)"))
-                                (:rep/secret w)))))
-      (testing "a token signed with what the session holds is refused"
-        (let [claims {"iss" "rep" "iat" (auth/now) "exp" (+ (auth/now) 3600) "jti" (uuid)}
-              forged (auth/sign {:rep/secret (:rep/file-secret w)} claims)]
-          (is (= 401 (:status (with-bearer w forged "1")))))))))
+                                (:rep/secret w))))))))

@@ -1,26 +1,17 @@
 (ns rep.prelude
   "What REP adds to a session. A session is a babashka process of its
    own, so files, futures, atoms and every babashka namespace are there
-   already. This namespace adds bash with its output in the answer and
-   signed URLs for files. The server loads it when it starts the process
-   and refers `sh`, `upload-url`, `download-url` and `help` into `user`."
-  (:require [babashka.process :as process]
-            [rep.files :as files]))
+   already. This namespace adds bash with its output in the answer. The
+   server loads it when it starts the process and refers `sh` and
+   `help` into `user`."
+  (:require [babashka.process :as process]))
 
-(defonce ^{:doc "What the server told this session: `:secret` signs the
-  file URLs and nothing else, `:base-url` is the server's public URL when it
-  has one, `:url-seconds` how long a URL holds, `:parent` the server's
-  process id, `:shared-image?` is true in the one process that all sessions
-  share."}
+(defonce ^{:doc "What the server told this session: `:parent` is the
+  server's process id, `:shared-image?` is true in the one process that
+  all sessions share. No key and no token is among it: the server has
+  none to give."}
   config
   (atom {}))
-
-(def ^:dynamic *base-url*
-  "Where the caller of the evaluation that runs right now reached the
-   server. The server binds it around the code of every request, so in
-   a process that several callers share each one gets URLs for its own
-   address. A future that the code starts keeps the binding."
-  nil)
 
 (defn- parent-alive?
   [pid]
@@ -82,32 +73,6 @@
         (process/destroy-tree running)
         (throw e)))))
 
-(defn- signed-url
-  "A signed URL that starts where the caller of this evaluation reached
-   the server, else at the server's public URL."
-  [method path seconds]
-  (let [{:keys [secret base-url url-seconds]} @config]
-    (files/url {:rep/file-secret secret}
-               {:url/method method
-                :url/path path
-                :url/seconds (or seconds url-seconds)
-                :url/base (or *base-url* base-url)})))
-
-(defn upload-url
-  "A URL for an HTTP PUT whose body becomes the file at `path` in the work
-   folder. It needs no token and expires. A file that is too large for
-   one request goes up in parts: the same URL with `&offset=<n>` appends
-   the body at that offset, and offset 0 starts the file over."
-  ([path] (signed-url "PUT" path nil))
-  ([path seconds] (signed-url "PUT" path seconds)))
-
-(defn download-url
-  "A URL that answers an HTTP GET with the file at `path` in the work
-   folder. It needs no token and expires. A `Range` header fetches a
-   part of the file."
-  ([path] (signed-url "GET" path nil))
-  ([path seconds] (signed-url "GET" path seconds)))
-
 (defn error-data
   "The data of the exception `e` when the code itself put it there, for
    the server to show below the error."
@@ -127,11 +92,10 @@
   (println)
   (println "(sh script)")
   (println "  Runs the bash script in the work folder, its output goes into the answer as bash wrote it. Answers {:exit <code>}.")
-  (println "(upload-url path) (upload-url path seconds)")
-  (println "  A URL for an HTTP PUT whose body becomes the file at path in the work folder.")
-  (println "  A large file goes up in parts: the same URL with &offset=<bytes so far>, 0 starts the file over.")
-  (println "(download-url path) (download-url path seconds)")
-  (println "  A URL that answers an HTTP GET with the file at path in the work folder. A Range header fetches a part.")
+  (println)
+  (println "Files of the work folder move over HTTP, with the token you send here:")
+  (println "  PUT /file/<path>   the body becomes the file. A large file goes up in parts, with ?offset=<bytes so far>.")
+  (println "  GET /file/<path>   answers the file. A Range header fetches a part.")
   (println)
   (println "Long work: start it in a future and keep the result in an atom, then ask in a later request.")
   (println "  (def result (atom nil))")
@@ -143,9 +107,7 @@
     (println "A second request runs while the first is busy. It can end a hung script with pkill, or the whole session with (System/exit 0).")))
 
 (comment
-  (configure! {:secret "secret" :url-seconds 900})
+  (configure! {:parent (.pid (java.lang.ProcessHandle/current))})
   (sh "echo one; echo two >&2; exit 3")
   (with-out-str (sh "echo captured"))
-  (binding [*base-url* "http://127.0.0.1:8730"]
-    (upload-url "in/clip.mp4"))
-  (download-url "out/final.mp4" 60))
+  (help))

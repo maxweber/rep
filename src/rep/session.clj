@@ -67,15 +67,12 @@
 
 (defn- setup-code
   "What a fresh process evaluates before the first request."
-  [{:rep/keys [file-secret url-seconds prelude shared-image? public-url]}]
+  [{:rep/keys [prelude shared-image?]}]
   (str "(require 'rep.prelude)"
        (pr-str (list 'rep.prelude/configure!
-                     (cond-> {:secret file-secret
-                              :url-seconds url-seconds
-                              :parent (.pid (java.lang.ProcessHandle/current))}
-                       shared-image? (assoc :shared-image? true)
-                       public-url (assoc :base-url public-url))))
-       "(require '[rep.prelude :refer [sh upload-url download-url help]])"
+                     (cond-> {:parent (.pid (java.lang.ProcessHandle/current))}
+                       shared-image? (assoc :shared-image? true))))
+       "(require '[rep.prelude :refer [sh help]])"
        (when prelude
          (pr-str (list 'load-file (str (fs/absolutize prelude)))))))
 
@@ -257,7 +254,7 @@
   nil)
 
 (comment
-  (def w {:rep/dir "work" :rep/file-secret "secret" :rep/url-seconds 900 :rep/sessions (atom {})})
+  (def w {:rep/dir "work" :rep/sessions (atom {})})
   (def session (process! w "s1"))
   (:session/port session)
   (:session/start-ms session)

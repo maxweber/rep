@@ -91,19 +91,9 @@
   "`body` as one form for the server. `load-string` stops at the first
    error, answers the value of the last form and counts lines as the
    caller wrote them. Plain nREPL would go on after an error. The
-   namespace that `body` switches to does not stay either.
-
-   With `base-url` the form binds `rep.prelude/*base-url*` to it while
-   the body runs. That is where the caller reached the server, and the
-   URLs that `upload-url` and `download-url` hand out start there. The
-   binding belongs to this one evaluation, so two callers that reach
-   the server under two addresses never get each other's."
-  ([body]
-   (str "(load-string " (pr-str body) ")"))
-  ([body base-url]
-   (if base-url
-     (str "(binding [rep.prelude/*base-url* " (pr-str (str base-url)) "] " (wrapped body) ")")
-     (wrapped body))))
+   namespace that `body` switches to does not stay either."
+  [body]
+  (str "(load-string " (pr-str body) ")"))
 
 (defn converse!
   "Sends `code` as the eval `id` in the nREPL session `:nrepl/session`
@@ -161,7 +151,6 @@
   (def session (clone! connection))
   (call! connection {"op" "eval" "session" session "code" "(println \"hi\") (+ 1 2)"})
   (call! connection {"op" "eval" "session" session "code" (wrapped "(ns other) (/ 1 0) :never")})
-  (wrapped "(upload-url \"in/a.txt\")" "https://machine.example")
 
   (def chunks (atom []))
   (def result (converse! (assoc connection :nrepl/session session)

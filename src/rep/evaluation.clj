@@ -138,9 +138,8 @@
 (defn- evaluate!
   "Runs `body` in the session's process and answers the outcome. Every
    evaluation has a connection and an nREPL session of its own, so that
-   two of them run at the same time. The address the caller reached the
-   server under travels with the code, as a binding around it."
-  [w {:evaluation/keys [session id output base-url]} body]
+   two of them run at the same time."
+  [w {:evaluation/keys [session id output]} body]
   (let [{:session/keys [port error]} (process! w session)]
     (if error
       (do
@@ -152,7 +151,7 @@
                 _ (nrepl/send! connection {"op" "eval"
                                            "id" id
                                            "session" nrepl-session
-                                           "code" (nrepl/wrapped body base-url)})
+                                           "code" (nrepl/wrapped body)})
                 {:keys [value failed?]} (try
                                           (follow! connection id output)
                                           (catch clojure.lang.ExceptionInfo e
@@ -223,7 +222,7 @@
 (defn- start!
   "Makes the evaluation's folder and record, and starts its thread."
   [{:rep/keys [evaluations output-limit] :as w}
-   {:request/keys [session id body base-url]}]
+   {:request/keys [session id body]}]
   (let [state (session-state w session)
         dir (folder w session id)
         record {:state :running
@@ -235,7 +234,6 @@
         _ (reserve! w session)
         evaluation {:evaluation/session session
                     :evaluation/id id
-                    :evaluation/base-url base-url
                     :evaluation/record record
                     :evaluation/output (output/open (output-file w session id) output-limit)
                     :evaluation/done (promise)}]
