@@ -228,23 +228,44 @@
            :rep/leeway 30}
         now 1700000000
         signed (fn [claims]
-                 (token/sign (merge {"aud" "machine" "iss" "https://issuer.example" "org" "org-1" "exp" (+ now 60)} claims)
+                 (token/sign (merge {"aud" "machine" "iss" "https://issuer.example" "org" "org-1"
+                                     "sub" "user_01" "iat" now "exp" (+ now 60)}
+                                    claims)
                              (:token/private-key pair)))
+        without (fn [claim]
+                  (token/sign (dissoc {"aud" "machine" "iss" "https://issuer.example" "org" "org-1"
+                                       "sub" "user_01" "iat" now "exp" (+ now 60)}
+                                      claim)
+                              (:token/private-key pair)))
         check (fn [claims] (auth/check w (signed claims)))]
     (with-redefs [auth/now (constantly now)]
       (testing "the issuer has to be the server's, and a claim the server asks for has to have its value"
         (is (:auth/claims (check {})))
         (is (= {:auth/refused :issuer} (check {"iss" "https://another.example"})))
-        (is (= {:auth/refused :issuer} (auth/check w (token/sign {"aud" "machine" "org" "org-1" "exp" (+ now 60)}
-                                                                 (:token/private-key pair))))
-            "no iss at all")
+        (is (= {:auth/refused :issuer} (auth/check w (without "iss"))) "no iss at all")
         (is (= {:auth/refused :claim} (check {"org" "org-2"})))
-        (is (= {:auth/refused :claim} (auth/check w (token/sign {"aud" "machine" "iss" "https://issuer.example" "exp" (+ now 60)}
-                                                                (:token/private-key pair))))
-            "no org at all")
+        (is (= {:auth/refused :claim} (auth/check w (without "org"))) "no org at all")
         (is (= {:auth/refused :claim} (check {"org" nil}))))
-      (testing "a server without them reads neither"
-        (is (:auth/claims (auth/check (dissoc w :rep/issuer :rep/claims) (signed {"iss" "anybody" "org" "any"})))))
+      (testing "an issuer's token says who asks: sub is a text that is not blank"
+        (is (= {:auth/refused :subject} (auth/check w (without "sub"))) "no sub at all")
+        (doseq [sub [42 "" "  " nil true ["user_01"] {"id" "user_01"}]]
+          (is (= {:auth/refused :subject} (check {"sub" sub})) (pr-str sub))))
+      (testing "and when it was made: iat is a number that does not lie ahead, the leeway counted in"
+        (is (= {:auth/refused :issued-at} (auth/check w (without "iat"))) "no iat at all")
+        (doseq [iat ["1700000000" nil true [now]]]
+          (is (= {:auth/refused :issued-at} (check {"iat" iat})) (pr-str iat)))
+        (is (:auth/claims (check {"iat" (- now 3600)})) "an old one is the exp's business")
+        (is (:auth/claims (check {"iat" (+ now 30)})) "a clock that lags by the leeway")
+        (is (= {:auth/refused :issued-at} (check {"iat" (+ now 31)})))
+        (is (= {:auth/refused :issued-at} (check {"iat" (+ now 86400)})))
+        (is (= {:auth/refused :issued-at} (auth/check (dissoc w :rep/leeway) (signed {"iat" (+ now 1)})))
+            "without a leeway not a second ahead"))
+      (testing "a server without them reads neither, and no sub and no iat either"
+        (is (:auth/claims (auth/check (dissoc w :rep/issuer :rep/claims) (signed {"iss" "anybody" "org" "any"}))))
+        (is (:auth/claims (auth/check (dissoc w :rep/issuer :rep/claims)
+                                      (token/sign {"aud" "machine" "exp" (+ now 60)} (:token/private-key pair)))))
+        (is (:auth/claims (auth/check (dissoc w :rep/issuer :rep/claims)
+                                      (token/sign {"aud" "machine" "sub" 42 "iat" "soon" "exp" (+ now 60)} (:token/private-key pair))))))
       (testing "a token counts for the leeway past its exp and no second longer"
         (is (:auth/claims (check {"exp" (- now 29)})))
         (is (= {:auth/refused :expired} (check {"exp" (- now 30)})))

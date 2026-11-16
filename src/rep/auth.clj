@@ -29,6 +29,10 @@
      :audience       `aud` is not the server's `:rep/audience` and no
                      array that has it
      :issuer         the server has `:rep/issuer`, and `iss` is not it
+     :subject        the server has `:rep/issuer`, and `sub` is no text
+                     or a blank one
+     :issued-at      the server has `:rep/issuer`, and `iat` is no
+                     number or lies ahead, `:rep/leeway` counted in
      :claim          the server has `:rep/claims`, and a claim it names
                      has another value or is missing
 
@@ -37,6 +41,11 @@
    nothing else. `jwk`, `jku`, `x5u` and `x5c` choose nothing: a key
    never comes from a token. The payload is read after the signature
    holds, never before.
+
+   A server with `:rep/issuer` takes the tokens of one issuer, and such
+   a token says who asks and when it was made: `sub` and `iat` are
+   asked for then. A server without an issuer reads neither, and a
+   token of its own may leave them out.
 
    The keys, `:rep/public-keys`, are one of three:
 
@@ -75,6 +84,8 @@
    :no-audience "its token has no aud"
    :audience "its token's aud is not this server's audience"
    :issuer "its token's iss is not this server's issuer"
+   :subject "its token's sub is no text that names who asks"
+   :issued-at "its token's iat is no number, or lies ahead"
    :claim "a claim of its token is not what this server asks for"})
 
 (defn now
@@ -237,7 +248,7 @@
 (defn- unfit
   "Why the claims of a token whose signature holds do not let it in, as
    a keyword, or nil when they do. `w` is the system of `check`."
-  [{:rep/keys [audience issuer leeway] required :rep/claims} {:strs [exp nbf aud iss] :as claims}]
+  [{:rep/keys [audience issuer leeway] required :rep/claims} {:strs [exp nbf aud iss sub iat] :as claims}]
   (let [leeway (if (number? leeway) leeway 0)]
     (cond
       (not (map? claims)) :claims
@@ -247,6 +258,8 @@
       (nil? aud) :no-audience
       (not (fits? audience aud)) :audience
       (and (some? issuer) (not= issuer iss)) :issuer
+      (and (some? issuer) (not (and (string? sub) (not (str/blank? sub))))) :subject
+      (and (some? issuer) (not (and (number? iat) (<= iat (+ (now) leeway))))) :issued-at
       (some (fn [[claim value]] (not= value (get claims claim ::none))) required) :claim)))
 
 (defn- unsigned
@@ -266,7 +279,9 @@
 (defn check
   "Verifies `token` for the system `w`, which has `:rep/public-keys`,
    the keys, see the namespace, and `:rep/audience`, the name of this
-   machine. It may have `:rep/issuer`, what a token's `iss` has to be,
+   machine. It may have `:rep/issuer`, what a token's `iss` has to be:
+   then `sub` has to be a text that is not blank and `iat` a number
+   that does not lie ahead,
    `:rep/claims`, a map of more claims to the value each has to have,
    and `:rep/leeway`, for how many seconds past its `exp` a token still
    counts, for a machine whose clock lags after it woke. Answers

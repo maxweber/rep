@@ -169,7 +169,11 @@ ask for more, and none of it has a variable of the environment:
   function is for a host whose list comes from an address and changes: the
   host fetches and keeps it, rep asks once for every token.
   `rep.token/sign` takes the `kid` as its third argument.
-- **`:rep/issuer`**: what `iss` has to be.
+- **`:rep/issuer`**: what `iss` has to be. A server with an issuer takes
+  that issuer's tokens, and such a token says who asks and when it was
+  made: `sub` has to be a text that is not blank, and `iat` a number that
+  does not lie ahead, `:rep/leeway` counted in. A server without an issuer
+  reads neither.
 - **`:rep/claims`**: more claims a token has to have, a map of a claim's
   name to its value.
 - **`:rep/leeway`**: for how many seconds past its `exp` a token still

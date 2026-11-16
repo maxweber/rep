@@ -325,8 +325,11 @@
                       has to hold, also `REP_AUDIENCE`. A server with keys
                       and without it throws
    :rep/issuer        what the `iss` of a token has to be, for a server
-                      that takes one issuer's tokens. Without it `iss` is
-                      not read
+                      that takes one issuer's tokens. Such a token also
+                      has to say who asks and when it was made: `sub`, a
+                      text that is not blank, and `iat`, a number that
+                      does not lie ahead. Without an issuer none of the
+                      three is read
    :rep/claims        more claims a token has to have, a map of a claim's
                       name to its value, {\"org\" \"...\"} say
    :rep/leeway        for how many seconds past its `exp` a token still
